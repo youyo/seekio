@@ -1,0 +1,42 @@
+{
+  "name": "seekio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Video I/O for AI agents. Remote MCP server that exposes video timelines as timestamped image frames.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "test:integration": "SEEKIO_INTEGRATION=1 vitest run --dir test/integration",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "deploy": "wrangler deploy"
+  },
+  "packageManager": "pnpm@10.18.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.24.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.0",
+    "@cloudflare/workers-types": "5.20260920.1",
+    "@types/node": "^24.13.6",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "4.112.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "@biomejs/biome"
+    ]
+  }
+}

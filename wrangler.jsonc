@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seekio",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-21",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "stream": { "binding": "STREAM", "remote": true },
+  "vars": {
+    // Public, non-secret tuning knobs. Secrets (SEEKIO_AUTH_TOKEN) are set with `wrangler secret put`.
+    "MAX_VIDEO_DURATION_SECONDS": "300",
+    "UPLOAD_URL_TTL_SECONDS": "900"
+  }
+}

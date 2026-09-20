@@ -1,0 +1,44 @@
+[tools]
+node = "24"
+pnpm = "latest"
+
+[tasks.install]
+description = "Install dependencies"
+run = "pnpm install --frozen-lockfile"
+
+[tasks.dev]
+description = "Run Seekio locally"
+run = "pnpm wrangler dev"
+
+[tasks.typecheck]
+description = "Type check"
+run = "pnpm tsc --noEmit"
+
+[tasks.lint]
+description = "Lint and format check"
+run = "pnpm biome check ."
+
+[tasks.test]
+description = "Run tests"
+run = "pnpm vitest run"
+
+[tasks."test:integration"]
+description = "Run real Cloudflare Stream integration tests (requires a deployed Seekio and credentials)"
+run = "pnpm test:integration"
+
+[tasks.check]
+description = "Run all CI checks"
+depends = ["typecheck", "lint", "test"]
+
+[tasks.deploy]
+description = "Deploy Seekio Worker"
+depends = ["check"]
+run = "pnpm wrangler deploy"
+
+[tasks.portal]
+description = "Register/update Seekio in Cloudflare MCP Server Portal"
+run = "pnpm tsx scripts/portal.ts"
+
+[tasks."portal:dry-run"]
+description = "Show MCP Server Portal changes without applying"
+run = "pnpm tsx scripts/portal.ts --dry-run"
