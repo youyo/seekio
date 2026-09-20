@@ -3,7 +3,7 @@ import pkg from "../../package.json";
 import type { SeekioConfig } from "../config";
 import { log } from "../log";
 import type { VideoBackend, VideoInfo } from "../video/backend";
-import { isSeekioError, messages, SeekioError } from "./errors";
+import { isSeekioError, messages, SeekioError, type SeekioErrorCode } from "./errors";
 import { instructions } from "./instructions";
 import { registerCreateUpload } from "./tools/create-upload";
 import { registerDelete } from "./tools/delete";
@@ -18,6 +18,13 @@ export type ToolDeps = {
   backend: VideoBackend;
   config: SeekioConfig;
 };
+
+/** Error codes that originate in the video provider and therefore deserve a `backend.error` log line. */
+const BACKEND_ERROR_CODES = new Set<SeekioErrorCode>([
+  "BACKEND_ERROR",
+  "FRAME_FETCH_FAILED",
+  "UPLOAD_CREATE_FAILED",
+]);
 
 type ToolResult = {
   content: Array<
@@ -41,7 +48,7 @@ export async function runTool(tool: string, body: () => Promise<ToolResult>): Pr
           "BACKEND_ERROR",
           `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
         );
-    if (seekioError.code === "BACKEND_ERROR") {
+    if (BACKEND_ERROR_CODES.has(seekioError.code)) {
       log("backend.error", { tool, code: seekioError.code, message: seekioError.message });
     }
     return {

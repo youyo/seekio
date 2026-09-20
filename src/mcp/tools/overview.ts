@@ -3,6 +3,7 @@ import { z } from "zod";
 import { log } from "../../log";
 import { fetchFramesBounded, frameTextContent, frameToImageContent } from "../../video/frame";
 import { overviewTimestamps } from "../../video/timestamps";
+import { SeekioError } from "../errors";
 import { requireReady, runTool, type ToolDeps } from "../server";
 import { videoIdSchema } from "./info";
 
@@ -19,7 +20,6 @@ export function registerOverview(server: McpServer, deps: ToolDeps): void {
           .number()
           .int()
           .min(1)
-          .max(deps.config.maxFramesPerCall)
           .optional()
           .describe(`Maximum number of frames (default ${deps.config.overviewMaxFrames}).`),
         interval_seconds: z
@@ -33,8 +33,15 @@ export function registerOverview(server: McpServer, deps: ToolDeps): void {
       runTool("video_overview", async () => {
         const started = Date.now();
         const info = await requireReady(deps, video_id);
+        const maxFrames = max_frames ?? deps.config.overviewMaxFrames;
+        if (maxFrames > deps.config.maxFramesPerCall) {
+          throw new SeekioError(
+            "TOO_MANY_FRAMES",
+            `max_frames ${maxFrames} exceeds the limit of ${deps.config.maxFramesPerCall} frames per call.`,
+          );
+        }
         const timestamps = overviewTimestamps(info.duration, {
-          maxFrames: max_frames ?? deps.config.overviewMaxFrames,
+          maxFrames,
           ...(interval_seconds !== undefined && { intervalSeconds: interval_seconds }),
         });
         const frames = await fetchFramesBounded(

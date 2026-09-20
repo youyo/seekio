@@ -116,6 +116,13 @@ describe("video_overview", () => {
     ]);
   });
 
+  it("caps max_frames at the per-call limit with a TOO_MANY_FRAMES result", async () => {
+    backend.addVideo({ id: "v", duration: 120 });
+    const result = await harness.callTool("video_overview", { video_id: "v", max_frames: 31 });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^\[TOO_MANY_FRAMES\]/);
+  });
+
   it("defaults to 12 frames", async () => {
     backend.addVideo({ id: "v", duration: 120 });
     const result = await harness.callTool("video_overview", { video_id: "v" });
@@ -148,6 +155,18 @@ describe("video_frames", () => {
       "[TOO_MANY_FRAMES] Requested 61 frames, but Seekio allows at most 30 frames per call. Narrow the interval or reduce fps.",
     );
     expect(backend.calls.filter((c) => c.op === "getFrame")).toHaveLength(0);
+  });
+
+  it("reports fps above the limit with the Seekio error format", async () => {
+    backend.addVideo({ id: "v", duration: 10 });
+    const result = await harness.callTool("video_frames", {
+      video_id: "v",
+      start: 0,
+      end: 0.1,
+      fps: 31,
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^\[INVALID_INTERVAL\] fps 31 exceeds the maximum of 30/);
   });
 
   it("rejects end beyond the duration", async () => {

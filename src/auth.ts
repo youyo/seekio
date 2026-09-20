@@ -2,9 +2,11 @@ import type { Env } from "./env";
 import { log } from "./log";
 
 const CERTS_CACHE_TTL_MS = 5 * 60 * 1000;
+/** Unknown `kid`s force a refetch at most this often, so unauthenticated callers cannot hammer the certs endpoint. */
+const CERTS_MIN_REFETCH_MS = 60 * 1000;
 
 type Jwk = JsonWebKey & { kid?: string };
-type CertsCacheEntry = { keys: Jwk[]; fetchedAt: number };
+type CertsCacheEntry = { keys: Jwk[]; fetchedAt: number; forcedAt?: number };
 const certsCache = new Map<string, CertsCacheEntry>();
 
 function reject(status: 401 | 403, reason: string, headers: Record<string, string> = {}): Response {
@@ -49,14 +51,22 @@ function normalizeTeamDomain(raw: string): string {
 
 async function fetchCerts(teamDomain: string, forceRefresh: boolean): Promise<Jwk[]> {
   const cached = certsCache.get(teamDomain);
-  if (cached && !forceRefresh && Date.now() - cached.fetchedAt < CERTS_CACHE_TTL_MS) {
-    return cached.keys;
+  const now = Date.now();
+  if (cached) {
+    const fresh = now - cached.fetchedAt < CERTS_CACHE_TTL_MS;
+    const recentlyForced =
+      cached.forcedAt !== undefined && now - cached.forcedAt < CERTS_MIN_REFETCH_MS;
+    if (forceRefresh ? recentlyForced : fresh) return cached.keys;
   }
   const response = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
   if (!response.ok) throw new Error(`certs endpoint returned HTTP ${response.status}`);
   const body = (await response.json()) as { keys?: Jwk[] };
   const keys = body.keys ?? [];
-  certsCache.set(teamDomain, { keys, fetchedAt: Date.now() });
+  certsCache.set(teamDomain, {
+    keys,
+    fetchedAt: now,
+    ...(forceRefresh && { forcedAt: now }),
+  });
   return keys;
 }
 

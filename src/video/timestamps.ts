@@ -2,6 +2,8 @@ import { SeekioError } from "../mcp/errors";
 
 /** Stream thumbnails at exactly `duration` fall off the end; stay just inside. */
 const END_MARGIN_SECONDS = 0.001;
+/** Absorbs binary floating point noise when comparing derived timestamps. */
+const EPSILON = 1e-9;
 
 function round3(value: number): number {
   return Math.round(value * 1000) / 1000;
@@ -34,11 +36,17 @@ export function overviewTimestamps(duration: number, opts: OverviewOptions): num
     if (!(intervalSeconds > 0)) {
       throw new SeekioError("INVALID_INTERVAL", "interval_seconds must be greater than 0.");
     }
-    const timestamps: number[] = [];
-    for (let t = 0; t < duration && timestamps.length < opts.maxFrames; t += intervalSeconds) {
-      timestamps.push(t);
+    const count = Math.ceil(duration / intervalSeconds);
+    if (count > opts.maxFrames) {
+      throw new SeekioError(
+        "TOO_MANY_FRAMES",
+        `interval_seconds ${intervalSeconds} needs ${count} frames, but max_frames is ${opts.maxFrames}. Increase interval_seconds or max_frames.`,
+      );
     }
-    return normalize(timestamps, duration);
+    return normalize(
+      Array.from({ length: count }, (_, i) => i * intervalSeconds),
+      duration,
+    );
   }
   const count = Math.floor(opts.maxFrames);
   if (count === 1) {
@@ -88,7 +96,7 @@ export function frameTimestamps(range: FrameRange, limits: FrameLimits): number[
     );
   }
   // Floating point guard: (end - start) * fps may land just under an integer.
-  const frameCount = Math.floor((end - start) * fps + 1e-9) + 1;
+  const frameCount = Math.floor((end - start) * fps + EPSILON) + 1;
   if (frameCount > limits.maxFramesPerCall) {
     throw new SeekioError(
       "TOO_MANY_FRAMES",
@@ -96,7 +104,7 @@ export function frameTimestamps(range: FrameRange, limits: FrameLimits): number[
     );
   }
   const timestamps = Array.from({ length: frameCount }, (_, index) => start + index / fps).filter(
-    (t) => t <= end + 1e-9,
+    (t) => t <= end + EPSILON,
   );
   return normalize(timestamps, duration);
 }
@@ -106,11 +114,12 @@ export function validateFrameAt(at: number, duration: number): number {
   if (!(duration > 0)) {
     throw new SeekioError("VIDEO_NOT_READY", "Video duration is unknown. Call video_info first.");
   }
-  if (!(at >= 0) || at >= duration) {
+  const rounded = round3(at);
+  if (!(rounded >= 0) || rounded >= duration) {
     throw new SeekioError(
       "INVALID_TIMESTAMP",
       `at must satisfy 0 <= at < ${duration} (video duration). Received ${at}.`,
     );
   }
-  return round3(at);
+  return rounded;
 }

@@ -9,11 +9,43 @@ const env = {
   SEEKIO_PORTAL_ID: "portal-1",
 };
 
+const SERVER_PATH = "/access/ai-controls/mcp/servers/seekio";
+const PORTAL_PATH = "/access/ai-controls/mcp/portals/portal-1";
+const allTools = () => SEEKIO_TOOLS.map((name) => ({ name }));
+const allEnabled = () => SEEKIO_TOOLS.map((name) => ({ name, enabled: true }));
+
 type Call = { method: string; path: string; body?: unknown };
 let calls: Call[];
 
 function respond(result: unknown): Response {
   return Response.json({ success: true, result });
+}
+
+function notFound(): Response {
+  return Response.json(
+    { success: false, errors: [{ code: 10000, message: "not found" }] },
+    { status: 404 },
+  );
+}
+
+function existing(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "seekio",
+    name: "Seekio",
+    hostname: env.SEEKIO_MCP_URL,
+    auth_type: "unauthenticated",
+    tools: [],
+    ...overrides,
+  };
+}
+
+function alignedPortal() {
+  return {
+    id: "portal-1",
+    name: "Eng",
+    hostname: "mcp.example.com",
+    servers: [{ server_id: "seekio", updated_tools: allEnabled() }],
+  };
 }
 
 beforeEach(() => {
@@ -51,34 +83,23 @@ describe("portal script", () => {
 
   it("creates the server, syncs, and adds the portal mapping on first run", async () => {
     stubApi(({ method, path }) => {
-      if (method === "GET" && path === "/access/ai-controls/mcp/servers") return respond([]);
+      if (method === "GET" && path === SERVER_PATH) return notFound();
       if (method === "POST" && path === "/access/ai-controls/mcp/servers")
-        return respond({
-          id: "seekio",
-          name: "Seekio",
-          hostname: env.SEEKIO_MCP_URL,
-          auth_type: "unauthenticated",
-          tools: [],
-        });
-      if (method === "POST" && path === "/access/ai-controls/mcp/servers/seekio/sync")
-        return respond({
-          id: "seekio",
-          status: "ready",
-          tools: SEEKIO_TOOLS.map((name) => ({ name })),
-        });
-      if (method === "GET" && path === "/access/ai-controls/mcp/portals/portal-1")
-        return respond({ id: "portal-1", name: "Eng", hostname: "mcp.example.com", servers: [] });
-      if (method === "PUT" && path === "/access/ai-controls/mcp/portals/portal-1")
-        return respond({});
+        return respond(existing());
+      if (method === "POST" && path === `${SERVER_PATH}/sync`)
+        return respond(existing({ status: "ready", tools: allTools() }));
+      if (method === "GET" && path === PORTAL_PATH)
+        return respond({ ...alignedPortal(), servers: [] });
+      if (method === "PUT" && path === PORTAL_PATH) return respond({});
       throw new Error(`unexpected ${method} ${path}`);
     });
     expect(await main([], env)).toBe(0);
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
-      "GET /access/ai-controls/mcp/servers",
+      `GET ${SERVER_PATH}`,
       "POST /access/ai-controls/mcp/servers",
-      "POST /access/ai-controls/mcp/servers/seekio/sync",
-      "GET /access/ai-controls/mcp/portals/portal-1",
-      "PUT /access/ai-controls/mcp/portals/portal-1",
+      `POST ${SERVER_PATH}/sync`,
+      `GET ${PORTAL_PATH}`,
+      `PUT ${PORTAL_PATH}`,
     ]);
     expect(calls[1]?.body).toEqual({
       id: "seekio",
@@ -89,78 +110,45 @@ describe("portal script", () => {
     expect(calls[4]?.body).toEqual({
       name: "Eng",
       hostname: "mcp.example.com",
-      servers: [
-        {
-          server_id: "seekio",
-          updated_tools: SEEKIO_TOOLS.map((name) => ({ name, enabled: true })),
-        },
-      ],
+      servers: [{ server_id: "seekio", updated_tools: allEnabled() }],
     });
   });
 
-  it("is a no-op on the second run and never writes in dry-run", async () => {
-    const aligned = () =>
-      stubApi(({ method, path }) => {
-        if (method !== "GET") throw new Error(`unexpected write ${method} ${path}`);
-        if (path === "/access/ai-controls/mcp/servers")
-          return respond([
-            {
-              id: "seekio",
-              name: "Seekio",
-              hostname: env.SEEKIO_MCP_URL,
-              auth_type: "unauthenticated",
-              tools: SEEKIO_TOOLS.map((name) => ({ name })),
-            },
-          ]);
-        return respond({
-          id: "portal-1",
-          name: "Eng",
-          hostname: "mcp.example.com",
-          servers: [
-            {
-              server_id: "seekio",
-              updated_tools: SEEKIO_TOOLS.map((name) => ({ name, enabled: true })),
-            },
-          ],
-        });
-      });
-    aligned();
+  it("never writes in dry-run and is a no-op once aligned", async () => {
+    stubApi(({ method, path }) => {
+      if (method !== "GET") throw new Error(`unexpected write ${method} ${path}`);
+      if (path === SERVER_PATH) return respond(existing({ tools: allTools() }));
+      return respond(alignedPortal());
+    });
     expect(await main(["--dry-run"], env)).toBe(0);
     expect(calls.every((c) => c.method === "GET")).toBe(true);
 
     calls = [];
     stubApi(({ method, path }) => {
-      if (method === "GET" && path === "/access/ai-controls/mcp/servers")
-        return respond([
-          {
-            id: "seekio",
-            name: "Seekio",
-            hostname: env.SEEKIO_MCP_URL,
-            auth_type: "unauthenticated",
-            tools: [],
-          },
-        ]);
-      if (method === "POST" && path.endsWith("/sync"))
-        return respond({
-          id: "seekio",
-          status: "ready",
-          tools: SEEKIO_TOOLS.map((name) => ({ name })),
-        });
-      if (method === "GET")
-        return respond({
-          id: "portal-1",
-          name: "Eng",
-          hostname: "mcp.example.com",
-          servers: [
-            {
-              server_id: "seekio",
-              updated_tools: SEEKIO_TOOLS.map((name) => ({ name, enabled: true })),
-            },
-          ],
-        });
+      if (method === "GET" && path === SERVER_PATH) return respond(existing());
+      if (method === "POST" && path === `${SERVER_PATH}/sync`)
+        return respond(existing({ status: "ready", tools: allTools() }));
+      if (method === "GET" && path === PORTAL_PATH) return respond(alignedPortal());
       throw new Error(`unexpected write ${method} ${path}`);
     });
     expect(await main([], env)).toBe(0);
     expect(calls.map((c) => c.method)).toEqual(["GET", "POST", "GET"]);
+  });
+
+  it("always re-sends a supplied bearer token so rotations reach the portal", async () => {
+    stubApi(({ method, path }) => {
+      if (method === "GET" && path === SERVER_PATH)
+        return respond(existing({ auth_type: "bearer" }));
+      if (method === "PUT" && path === SERVER_PATH)
+        return respond(existing({ auth_type: "bearer" }));
+      if (method === "POST" && path === `${SERVER_PATH}/sync`)
+        return respond(existing({ status: "ready", tools: allTools() }));
+      if (method === "GET" && path === PORTAL_PATH) return respond(alignedPortal());
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    expect(await main([], { ...env, SEEKIO_AUTH_TOKEN: "n3w-s3cret" })).toBe(0);
+    const put = calls.find((c) => c.method === "PUT");
+    expect(put?.body).toMatchObject({ auth_type: "bearer", auth_credentials: "n3w-s3cret" });
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).not.toContain("n3w-s3cret");
   });
 });

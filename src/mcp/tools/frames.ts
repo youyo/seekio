@@ -20,7 +20,6 @@ export function registerFrames(server: McpServer, deps: ToolDeps): void {
         fps: z
           .number()
           .positive()
-          .max(maxFps)
           .optional()
           .describe(`Frames per second (default ${defaultFramesFps}, max ${maxFps}).`),
       }),

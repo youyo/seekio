@@ -20,7 +20,8 @@ export function registerCreateUpload(server: McpServer, deps: ToolDeps): void {
           .describe("Original filename, kept as metadata."),
         max_duration_seconds: z
           .number()
-          .positive()
+          .int()
+          .min(1)
           .optional()
           .describe("Reject uploads longer than this many seconds. Defaults to the server limit."),
       }),

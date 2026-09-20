@@ -37,9 +37,12 @@ describe("overviewTimestamps", () => {
     expect(overviewTimestamps(30, { maxFrames: 1 })).toEqual([0]);
   });
 
-  it("uses a fixed interval when interval_seconds is set, bounded by max_frames", () => {
+  it("uses a fixed interval when interval_seconds is set and refuses to cover only part of the video", () => {
     expect(overviewTimestamps(10, { maxFrames: 12, intervalSeconds: 3 })).toEqual([0, 3, 6, 9]);
-    expect(overviewTimestamps(10, { maxFrames: 2, intervalSeconds: 3 })).toEqual([0, 3]);
+    expect(overviewTimestamps(0.3, { maxFrames: 12, intervalSeconds: 0.1 })).toEqual([0, 0.1, 0.2]);
+    expect(codeOf(() => overviewTimestamps(10, { maxFrames: 2, intervalSeconds: 3 }))).toBe(
+      "TOO_MANY_FRAMES",
+    );
   });
 
   it("rejects unusable durations and intervals", () => {
@@ -119,10 +122,12 @@ describe("validateFrameAt", () => {
   it("accepts sub-second timestamps inside the video", () => {
     expect(validateFrameAt(3.3474, 10)).toBe(3.347);
     expect(validateFrameAt(0, 10)).toBe(0);
+    expect(validateFrameAt(9.9994, 10)).toBe(9.999);
   });
 
   it("rejects timestamps outside [0, duration)", () => {
     expect(codeOf(() => validateFrameAt(10, 10))).toBe("INVALID_TIMESTAMP");
+    expect(codeOf(() => validateFrameAt(9.9996, 10))).toBe("INVALID_TIMESTAMP");
     expect(codeOf(() => validateFrameAt(-0.1, 10))).toBe("INVALID_TIMESTAMP");
     expect(codeOf(() => validateFrameAt(1, 0))).toBe("VIDEO_NOT_READY");
   });

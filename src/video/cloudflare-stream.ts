@@ -28,8 +28,7 @@ function isVideoStatus(state: string): state is VideoStatus {
 }
 
 function isNotFound(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return error.name === "NotFoundError" || /not found/i.test(error.message);
+  return error instanceof Error && error.name === "NotFoundError";
 }
 
 function backendError(error: unknown, action: string): SeekioError {

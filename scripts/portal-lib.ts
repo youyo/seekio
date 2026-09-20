@@ -108,6 +108,16 @@ export function serverDiff(current: PortalServer, desired: ServerBody): ServerDi
   return diff;
 }
 
+/**
+ * Credentials are write-only upstream, so a rotated SEEKIO_AUTH_TOKEN cannot be detected by diffing.
+ * Whenever a token is supplied, the server is updated so the portal always holds the current one.
+ */
+export function needsServerUpdate(current: PortalServer, desired: ServerBody): boolean {
+  return (
+    Object.keys(serverDiff(current, desired)).length > 0 || desired.auth_credentials !== undefined
+  );
+}
+
 export function missingTools(server: Pick<PortalServer, "tools">): string[] {
   const names = new Set((server.tools ?? []).map((tool) => tool.name));
   return SEEKIO_TOOLS.filter((tool) => !names.has(tool));

@@ -16,5 +16,8 @@ export function log(
   event: LogEvent,
   fields: Record<string, string | number | boolean | undefined>,
 ): void {
-  console.log(JSON.stringify({ event, ...fields }));
+  const line = JSON.stringify({ event, ...fields });
+  if (event === "backend.error") console.error(line);
+  else if (event === "auth.rejected") console.warn(line);
+  else console.log(line);
 }

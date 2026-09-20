@@ -8,6 +8,7 @@ import {
   desiredServer,
   mergePortalServers,
   missingTools,
+  needsServerUpdate,
   type Portal,
   type PortalEnv,
   type PortalServer,
@@ -17,6 +18,15 @@ import {
 } from "./portal-lib";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
+
+class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
 type ApiEnvelope<T> = {
   success: boolean;
@@ -38,9 +48,19 @@ async function api<T>(env: PortalEnv, method: string, path: string, body?: unkno
     const detail =
       envelope?.errors?.map((e) => `${e.code}: ${e.message}`).join("; ") ??
       `HTTP ${response.status}`;
-    throw new Error(`${method} ${path} failed: ${detail}`);
+    throw new ApiError(response.status, `${method} ${path} failed: ${detail}`);
   }
   return envelope.result;
+}
+
+/** Looks the server up by id so pagination of the list endpoint can never cause a duplicate create. */
+async function getServer(env: PortalEnv): Promise<PortalServer | undefined> {
+  try {
+    return await api<PortalServer>(env, "GET", `/access/ai-controls/mcp/servers/${env.serverId}`);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return undefined;
+    throw error;
+  }
 }
 
 function print(
@@ -65,8 +85,7 @@ export async function main(argv: string[], rawEnv: NodeJS.ProcessEnv): Promise<n
 
   // 1. Server: create or update.
   const desired = desiredServer(env);
-  const servers = await api<PortalServer[]>(env, "GET", "/access/ai-controls/mcp/servers");
-  let server = servers.find((s) => s.id === env.serverId);
+  let server = await getServer(env);
   if (!server) {
     print("server", "create", {
       id: desired.id,
@@ -77,9 +96,11 @@ export async function main(argv: string[], rawEnv: NodeJS.ProcessEnv): Promise<n
       server = await api<PortalServer>(env, "POST", "/access/ai-controls/mcp/servers", desired);
     else console.log(`[server] ${would("create")}`);
   } else {
-    const diff = serverDiff(server, desired);
-    if (Object.keys(diff).length > 0) {
-      print("server", "update", diff);
+    if (needsServerUpdate(server, desired)) {
+      print("server", "update", {
+        ...serverDiff(server, desired),
+        ...(desired.auth_credentials && { auth_credentials: "<rotated>" }),
+      });
       if (!dryRun)
         server = await api<PortalServer>(
           env,

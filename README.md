@@ -182,7 +182,7 @@ All tools return JSON or text in `text` content; frames are `image` content (`im
 | Input | Type | Notes |
 | --- | --- | --- |
 | `filename` | string, optional | Stored as metadata |
-| `max_duration_seconds` | number, optional | Must not exceed the server limit (default 300) |
+| `max_duration_seconds` | integer, optional | 1 to the server limit (default 300) |
 
 ```json
 {
@@ -218,7 +218,7 @@ Upload the file with `POST upload_url` as `multipart/form-data` (field `file`) b
 | --- | --- | --- |
 | `video_id` | string | |
 | `max_frames` | integer, optional | Default 12, max 30 |
-| `interval_seconds` | number, optional | Fixed spacing; omit to spread `max_frames` evenly |
+| `interval_seconds` | number, optional | Fixed spacing; omit to spread `max_frames` evenly. Returns `TOO_MANY_FRAMES` if covering the video would need more than `max_frames` |
 
 Returns a summary line followed by `Frame at <t>s` / image pairs in timestamp order. Timestamps are `i * duration / (N - 1)`, clamped to just before the end of the video, with duplicates removed for very short videos.
 

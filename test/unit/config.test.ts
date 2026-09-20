@@ -14,5 +14,6 @@ describe("resolveConfig", () => {
     expect(config.maxVideoDurationSeconds).toBe(600);
     expect(config.uploadUrlTtlSeconds).toBe(defaults.uploadUrlTtlSeconds);
     expect(resolveConfig({ MAX_VIDEO_DURATION_SECONDS: "0" }).maxVideoDurationSeconds).toBe(300);
+    expect(resolveConfig({ MAX_VIDEO_DURATION_SECONDS: "1.5" }).maxVideoDurationSeconds).toBe(300);
   });
 });
