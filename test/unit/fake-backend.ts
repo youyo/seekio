@@ -22,8 +22,12 @@ export class FakeVideoBackend implements VideoBackend {
   readonly calls: FakeCall[] = [];
   private nextId = 1;
 
-  addVideo(info: Partial<VideoInfo> & { id: string }): VideoInfo {
-    const video: VideoInfo = { status: "ready", duration: 10, width: 1179, height: 2556, ...info };
+  /** Adds a video; ready videos get a 10s duration and phone-like dimensions unless overridden. */
+  addVideo(info: { id: string; status?: VideoInfo["status"]; duration?: number }): VideoInfo {
+    const status = info.status ?? "ready";
+    const video: VideoInfo = { id: info.id, status, width: 1179, height: 2556 };
+    const duration = info.duration ?? (status === "ready" ? 10 : undefined);
+    if (duration !== undefined) video.duration = duration;
     this.videos.set(video.id, video);
     return video;
   }

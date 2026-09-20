@@ -1,19 +1,31 @@
-import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
-import { z } from "zod";
+import { authorize } from "./auth";
+import { resolveConfig } from "./config";
+import type { Env } from "./env";
+import { createSeekioServer, serverInfo } from "./mcp/server";
+import { CloudflareStreamBackend } from "./video/cloudflare-stream";
 
-function createServer() {
-  const server = new McpServer({ name: "seekio", version: "0.0.0" });
-  server.registerTool(
-    "hello",
-    { description: "smoke", inputSchema: z.object({ name: z.string().optional() }) },
-    async ({ name }) => ({ content: [{ type: "text", text: `Hello, ${name ?? "World"}!` }] }),
+const MCP_ROUTE = "/mcp";
+
+function mcpHandler(env: Env) {
+  const config = resolveConfig(env);
+  return createMcpHandler(
+    () => createSeekioServer({ backend: new CloudflareStreamBackend(env.STREAM, config), config }),
+    { route: MCP_ROUTE },
   );
-  return server;
 }
 
 export default {
-  fetch(request, env, ctx) {
-    return createMcpHandler(createServer)(request, env, ctx);
+  async fetch(request, env, ctx) {
+    const { pathname } = new URL(request.url);
+    if (pathname === "/health" && request.method === "GET") {
+      return Response.json({ status: "ok", ...serverInfo });
+    }
+    if (pathname === MCP_ROUTE) {
+      const rejected = await authorize(request, env);
+      if (rejected) return rejected;
+      return mcpHandler(env)(request, env, ctx);
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
   },
-} satisfies ExportedHandler;
+} satisfies ExportedHandler<Env>;
