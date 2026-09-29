@@ -86,20 +86,20 @@ describe("frameTimestamps", () => {
   it("refuses more than MAX_FRAMES_PER_CALL frames with an actionable message", () => {
     let caught: unknown;
     try {
-      frameTimestamps({ start: 0, end: 6, fps: 10, duration: 10 }, limits);
+      frameTimestamps({ start: 0, end: 1.5, fps: 10, duration: 10 }, limits);
     } catch (error) {
       caught = error;
     }
     expect(caught).toBeInstanceOf(SeekioError);
     expect((caught as SeekioError).code).toBe("TOO_MANY_FRAMES");
     expect((caught as SeekioError).message).toBe(
-      "Requested 61 frames, but Seekio allows at most 30 frames per call. Narrow the interval or reduce fps.",
+      "Requested 16 frames, but Seekio allows at most 15 frames per call. Narrow the interval or reduce fps.",
     );
   });
 
   it("allows exactly MAX_FRAMES_PER_CALL frames", () => {
-    const ts = frameTimestamps({ start: 0, end: 2.9, fps: 10, duration: 10 }, limits);
-    expect(ts).toHaveLength(30);
+    const ts = frameTimestamps({ start: 0, end: 1.4, fps: 10, duration: 10 }, limits);
+    expect(ts).toHaveLength(15);
   });
 
   it("rejects fps above MAX_FPS instead of degrading it", () => {

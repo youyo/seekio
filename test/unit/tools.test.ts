@@ -211,7 +211,7 @@ describe("video_overview", () => {
 
   it("caps max_frames at the per-call limit with a TOO_MANY_FRAMES result", async () => {
     backend.addVideo({ id: "v", duration: 120 });
-    const result = await harness.callTool("video_overview", { video_id: "v", max_frames: 31 });
+    const result = await harness.callTool("video_overview", { video_id: "v", max_frames: 16 });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/^\[TOO_MANY_FRAMES\]/);
   });
@@ -240,12 +240,12 @@ describe("video_frames", () => {
     const result = await harness.callTool("video_frames", {
       video_id: "v",
       start: 0,
-      end: 6,
+      end: 1.5,
       fps: 10,
     });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toBe(
-      "[TOO_MANY_FRAMES] Requested 61 frames, but Seekio allows at most 30 frames per call. Narrow the interval or reduce fps.",
+      "[TOO_MANY_FRAMES] Requested 16 frames, but Seekio allows at most 15 frames per call. Narrow the interval or reduce fps.",
     );
     expect(backend.calls.filter((c) => c.op === "getFrame")).toHaveLength(0);
   });

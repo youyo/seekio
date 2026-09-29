@@ -176,7 +176,7 @@ claude mcp add --transport http seekio https://seekio.example.workers.dev/mcp \
 
 ## Tool reference
 
-All tools return JSON or text in `text` content; frames are `image` content (`image/jpeg`, base64). Errors come back as `isError: true` with `[CODE] message`, where the message tells the agent what to do next (for example `[TOO_MANY_FRAMES] Requested 61 frames, but Seekio allows at most 30 frames per call. Narrow the interval or reduce fps.`).
+All tools return JSON or text in `text` content; frames are `image` content (`image/jpeg`, base64). Errors come back as `isError: true` with `[CODE] message`, where the message tells the agent what to do next (for example `[TOO_MANY_FRAMES] Requested 16 frames, but Seekio allows at most 15 frames per call. Narrow the interval or reduce fps.`).
 
 ### `video_create_upload`
 
@@ -233,7 +233,7 @@ The duration limit cannot be enforced up front for imports: once the video is `r
 | Input | Type | Notes |
 | --- | --- | --- |
 | `video_id` | string | |
-| `max_frames` | integer, optional | Default 12, max 30 |
+| `max_frames` | integer, optional | Default 12, max 15 |
 | `interval_seconds` | number, optional | Fixed spacing; omit to spread `max_frames` evenly. Returns `TOO_MANY_FRAMES` if covering the video would need more than `max_frames` |
 
 Returns a summary line followed by `Frame at <t>s` / image pairs in timestamp order. Timestamps are `i * duration / (N - 1)`, clamped to just before the end of the video, with duplicates removed for very short videos.
@@ -247,7 +247,7 @@ Returns a summary line followed by `Frame at <t>s` / image pairs in timestamp or
 | `end` | number | seconds, `> start`, `<= duration` |
 | `fps` | number, optional | Default 5, max 30 |
 
-Timestamps are `start + index / fps` (no floating point accumulation). At most 30 frames per call; Seekio never lowers `fps` on its own, it returns `TOO_MANY_FRAMES` instead.
+Timestamps are `start + index / fps` (no floating point accumulation). At most 15 frames per call; Seekio never lowers `fps` on its own, it returns `TOO_MANY_FRAMES` instead.
 
 ### `video_frame`
 
@@ -290,8 +290,8 @@ The server instructions embedded in Seekio steer agents toward this progressive 
 | Upload size | 200 MB | Stream direct upload (v1 does not support tus) |
 | Video duration | 300 s | `MAX_VIDEO_DURATION_SECONDS` var (enforced by Stream for `video_create_upload`; checked after processing for `video_import_url`, where longer videos fail with `VIDEO_TOO_LONG`) |
 | Upload URL lifetime | 900 s | `UPLOAD_URL_TTL_SECONDS` var |
-| Overview frames | 12 (max 30) | `src/config.ts` |
-| Frames per `video_frames` call | 30 | `src/config.ts` |
+| Overview frames | 12 (max 15) | `src/config.ts` |
+| Frames per `video_frames` call | 15 | `src/config.ts` (kept within MCP clients' output limits: 30 frames at 720p exceeded Claude Code's 25,000-token cap) |
 | Max fps | 30 | `src/config.ts` |
 | Frame height | min(source height, 720 px); never upscaled | `src/config.ts` |
 | Concurrent frame fetches | 6 | `src/config.ts` |

@@ -4,7 +4,7 @@ export const defaults = {
   maxVideoDurationSeconds: 300,
   uploadUrlTtlSeconds: 900,
   maxUploadBytes: 209_715_200,
-  maxFramesPerCall: 30,
+  maxFramesPerCall: 15,
   defaultFramesFps: 5,
   maxFps: 30,
   overviewMaxFrames: 12,

@@ -513,7 +513,7 @@ defaults/limits:
 ``` text
 DEFAULT_FPS          = 5
 MAX_FPS              = 30
-MAX_FRAMES_PER_CALL  = 30
+MAX_FRAMES_PER_CALL  = 15
 ```
 
 validation:
@@ -524,7 +524,7 @@ end > start
 end <= duration
 fps > 0
 fps <= 30
-frame_count <= 30
+frame_count <= 15
 ```
 
 timestamp は浮動小数点累積を避ける。
@@ -536,7 +536,7 @@ timestamp = start + index / fps;
 上限超過時に自動で fps を落とさない。
 
 ``` text
-Requested 61 frames, but Seekio allows at most 30 frames per call.
+Requested 16 frames, but Seekio allows at most 15 frames per call.
 Narrow the interval or reduce fps.
 ```
 
@@ -658,7 +658,7 @@ overview / frames の画像取得は逐次にしない。一方、無制限 `Pro
 FRAME_FETCH_CONCURRENCY = 6
 ```
 
-程度の bounded concurrency を実装する。最大30 framesなので queue
+程度の bounded concurrency を実装する。最大15 framesなので queue
 infrastructure は不要。
 
 ## 16. Error model
@@ -767,7 +767,7 @@ backend.error
 export const defaults = {
   maxVideoDurationSeconds: 300,
   uploadUrlTtlSeconds: 900,
-  maxFramesPerCall: 30,
+  maxFramesPerCall: 15,
   defaultFramesFps: 5,
   maxFps: 30,
   overviewMaxFrames: 12,
@@ -1098,7 +1098,7 @@ release は6 toolsが揃った状態のみ。
 ### Frames
 
 -   start/end/fps から deterministic に timestamp 計算
--   最大30 frames
+-   最大15 frames
 -   上限超過時は自動縮退せず actionable error
 
 ### Frame
