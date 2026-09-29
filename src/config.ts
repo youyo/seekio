@@ -14,6 +14,12 @@ export const defaults = {
   infoMaxWaitSeconds: 25,
   infoPollIntervalMs: 2000,
   videoRetentionHours: 24,
+  /** Extra thumbnail attempts on HTTP 404 for video_frame (backoff base, 2x, 4x). */
+  frameRetrySingleMax: 3,
+  /** Extra thumbnail attempts per frame on HTTP 404 for video_frames / video_overview. */
+  frameRetryMultiMax: 1,
+  /** First 404 backoff; doubles on each further retry (1s, 2s, 4s). */
+  frameRetryBaseDelayMs: 1000,
 } as const;
 
 export type SeekioConfig = { -readonly [K in keyof typeof defaults]: number };

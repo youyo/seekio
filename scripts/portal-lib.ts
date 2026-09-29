@@ -10,6 +10,7 @@ export const SEEKIO_TOOLS = [
   "video_overview",
   "video_frames",
   "video_frame",
+  "video_transcript",
   "video_delete",
 ] as const;
 

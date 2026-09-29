@@ -30,6 +30,12 @@ When you already know the time to inspect (for example the on-screen text or cre
 2. Skip video_overview and call video_frame(at) for that exact moment, or video_frames with a narrow start/end range around it.
 3. Whole frames are downscaled, so small text (credits, captions, fine print) may be unreadable. To read it, call video_frame(at, region) with region = { x, y, width, height } as ratios (0-1) of the frame, origin at the top-left (x = left edge, y = top edge). For example the bottom credits are { x: 0, y: 0.8, width: 1, height: 0.2 }. The crop comes from the original-resolution frame.
 
+To check whether on-screen subtitles match the voice (narration), or to know when something is said:
+
+1. Call video_transcript with languages set to the language(s) spoken in the video (for example ["ja"], or ["ja","en"] when unsure or mixed; there is no automatic language detection). If a language is still inprogress, call it again with wait_seconds.
+2. Take the cue start/end times of the speech you care about (accurate to about ±0.5 seconds; each language is only reliable where that language is spoken).
+3. Look at the frames just before and after those times with video_frames (or video_frame for one exact time) and compare the subtitle shown on screen with the cue text.
+
 For frontend debugging, look for:
 - layout shifts
 - flickering

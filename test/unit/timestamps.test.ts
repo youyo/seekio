@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { defaults } from "../../src/config";
 import { SeekioError } from "../../src/mcp/errors";
-import { frameTimestamps, overviewTimestamps, validateFrameAt } from "../../src/video/timestamps";
+import {
+  frameCount,
+  frameTimestamps,
+  maxEndForFrames,
+  maxFpsForRange,
+  overviewTimestamps,
+  validateFrameAt,
+} from "../../src/video/timestamps";
 
 const limits = { maxFps: defaults.maxFps, maxFramesPerCall: defaults.maxFramesPerCall };
 
@@ -93,7 +100,7 @@ describe("frameTimestamps", () => {
     expect(caught).toBeInstanceOf(SeekioError);
     expect((caught as SeekioError).code).toBe("TOO_MANY_FRAMES");
     expect((caught as SeekioError).message).toBe(
-      "Requested 16 frames, but Seekio allows at most 15 frames per call. Narrow the interval or reduce fps.",
+      "Requested 16 frames (start 0s, end 1.5s, fps 10), but Seekio allows at most 15 frames per call. The frame count is floor((end - start) * fps) + 1. With start 0 and fps 10, end can be at most 1.4s. To keep end at 1.5s, lower fps to 9.333 or less. Or narrow the range.",
     );
   });
 
@@ -141,5 +148,73 @@ describe("validateFrameAt", () => {
     expect(codeOf(() => validateFrameAt(10, 10))).toBe("INVALID_TIMESTAMP");
     expect(codeOf(() => validateFrameAt(-0.1, 10))).toBe("INVALID_TIMESTAMP");
     expect(codeOf(() => validateFrameAt(1, 0))).toBe("VIDEO_NOT_READY");
+  });
+});
+
+describe("frameCount", () => {
+  it("matches the feedback examples (end is included when it lands on the frame grid)", () => {
+    expect(frameCount(0, 13, 1)).toBe(14);
+    expect(frameCount(138, 150.8, 1)).toBe(13);
+  });
+
+  it("is floor((end - start) * fps) + 1 and agrees with frameTimestamps", () => {
+    expect(frameCount(0, 1.4, 10)).toBe(15);
+    expect(frameCount(0, 1.5, 10)).toBe(16);
+    expect(frameCount(0, 14, 1)).toBe(15);
+    expect(frameCount(0, 0.3, 10)).toBe(4); // 0.3 * 10 = 3.0000000000000004 / float noise safe
+    expect(frameTimestamps({ start: 138, end: 150.8, fps: 1, duration: 200 }, limits)).toHaveLength(
+      13,
+    );
+  });
+});
+
+describe("maxEndForFrames", () => {
+  it("returns the largest end (ms precision) that fits the frame budget", () => {
+    expect(maxEndForFrames(0, 1, 15)).toBe(14);
+    expect(maxEndForFrames(0, 10, 15)).toBe(1.4);
+    expect(maxEndForFrames(138, 1, 15)).toBe(152);
+    expect(maxEndForFrames(0, 3, 15)).toBe(4.666);
+  });
+
+  it("fits exactly the budget at the boundary and overflows one millisecond-step past it", () => {
+    for (const [start, fps] of [
+      [0, 1],
+      [0, 10],
+      [138, 1],
+      [0.1, 3],
+      [2.4, 20],
+    ] as const) {
+      const end = maxEndForFrames(start, fps, 15);
+      expect(frameCount(start, end, fps)).toBeLessThanOrEqual(15);
+      expect(frameCount(start, end + 1 / fps, fps)).toBe(frameCount(start, end, fps) + 1);
+    }
+    expect(frameCount(0, maxEndForFrames(0, 1, 15), 1)).toBe(15);
+    expect(frameCount(0, maxEndForFrames(0, 1, 15) + 1, 1)).toBe(16);
+  });
+});
+
+describe("maxFpsForRange", () => {
+  it("returns the highest fps (0.001 steps) that fits the range in the budget", () => {
+    expect(maxFpsForRange(0, 1.5, 15)).toBe(9.333);
+    expect(maxFpsForRange(0, 14, 15)).toBe(1);
+    expect(frameCount(0, 1.5, 9.333)).toBeLessThanOrEqual(15);
+  });
+
+  it("returns undefined when even 0.001 fps cannot fit", () => {
+    expect(maxFpsForRange(0, 100000, 15)).toBeUndefined();
+  });
+});
+
+describe("frameTimestamps boundary", () => {
+  it("allows exactly 15 frames and refuses 16 with the counts in the message", () => {
+    expect(frameTimestamps({ start: 0, end: 14, fps: 1, duration: 100 }, limits)).toHaveLength(15);
+    let message = "";
+    try {
+      frameTimestamps({ start: 0, end: 15, fps: 1, duration: 100 }, limits);
+    } catch (error) {
+      message = (error as SeekioError).message;
+    }
+    expect(message).toContain("Requested 16 frames");
+    expect(message).toContain("end can be at most 14s");
   });
 });

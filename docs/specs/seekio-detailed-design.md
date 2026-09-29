@@ -32,7 +32,7 @@ Repository investigation / fix
 
 ## 2. v1 完成条件
 
-途中の vertical slice ではリリースせず、最初から以下の6 toolsを揃える（その後 `video_import_url` を追加し、現在は7 tools）。
+途中の vertical slice ではリリースせず、最初から以下の6 toolsを揃える（その後 `video_import_url` を追加し、その後 `video_transcript` を追加し、現在は8 tools）。
 
 ``` text
 video_create_upload
@@ -83,6 +83,11 @@ application database
 ```
 
 必要性が実利用で確認されるまで追加しない。
+
+`STT / Whisper` は「Seekio 自身が音声認識を実行しない」という意味である。
+Cloudflare Stream の AI 字幕生成を Workers binding 経由で呼ぶことは、
+Cloudflare Images の切り出しを呼ぶのと同じ扱い（外部サービスの機能を呼ぶだけ）
+とし、非目標には反しない（§13.8）。
 
 ## 4. システム構成
 
@@ -352,6 +357,54 @@ env.STREAM.video(id).details()
 env.STREAM.video(id).generateToken()
 env.STREAM.video(id).delete()
 ```
+
+### 10.0 Cloudflare Stream の AI 字幕（`video_transcript`）
+
+`video_transcript`（§13.8）のために、Stream binding の字幕 API を使う。
+
+``` ts
+env.STREAM.video(id).captions.list()
+env.STREAM.video(id).captions.generate(lang)
+```
+
+本文（WebVTT）は binding からは取れない（`StreamCaption` は
+`{ language, label, generated?, status? }` で本文を持たない）。サムネイルと同じ
+オリジンに、署名トークンを付けて GET する。
+
+``` text
+https://<thumbnail と同じオリジン>/<署名トークン>/captions/<lang>   -> text/vtt
+```
+
+`.vtt` や `/vtt` を付けると 404、トークンの位置に動画 ID を入れると 401 になる。
+トークンは `generateToken()` の値（`thumbnailSource` の base と同じ）をそのまま使う。
+
+実サービスで確認した挙動:
+
+- 対応言語は 12: cs, nl, en, fr, de, it, ja, ko, pl, pt, ru, es。自動判定はなく、
+  言語の指定が必須。`en-US` のような派生形は `en` とは別の字幕として作られてしまうため、
+  Seekio は受け付けない。
+- 1 本の動画に複数言語の字幕を作れる。同じ言語の 2 回目の generate は
+  `BadRequestError`（"There is an existing caption for this language..."）になる。
+  Seekio はこれを成功扱いにして状態を見に行く。
+- 日本語と英語が混ざった動画では、指定した言語の部分しか信頼できない。他の言語の部分は
+  幻覚（「ご視聴ありがとうございました」など）や誤訳になる。
+- 生成は非同期（inprogress -> ready / error）。180 秒の動画で ja が約 11 秒、en が約 7 秒。
+- VTT のタイムスタンプはミリ秒精度。cue は句や文の単位で、発話開始とのずれは概ね ±0.5 秒。
+  1 文が複数の cue に割れたり、長さ 0 の cue が出たりする。
+- binding のエラー（リモート binding では message の先頭に種類が付く）:
+  `StreamBindingError: Missing Audio`（音声なし）、`StreamBindingError: Language not
+  supported`、`BadRequestError`（不正な言語 / 既存の字幕）、`NotFoundError`（動画なし）。
+
+採用の理由:
+
+- テスターから「音声は見られない。ナレーション付きの動画で、字幕と声がずれていないかを
+  確かめられなかった」という声があり、実利用で必要性が確認された。
+  ユーザーからは「文字起こしは日本語にも英語にも柔軟に対応できる必要がある」との要望もあった。
+- Seekio は音声認識を実装しない。Stream の機能を呼び、結果を時刻付きで返すだけ。
+  R2・ffmpeg・DB などの追加は不要で、動画の保存とエンコードは引き続き Stream が担当する。
+- 料金: 2024 年の Cloudflare 公式ブログ（Stream の AI 字幕生成の発表）に「追加料金なし」
+  とある。現行の料金ページには字幕生成の記載がない。確認できている根拠はこのブログのみで、
+  将来課金される可能性は残る。
 
 ### 10.1 Cloudflare Images binding（region 切り出し）
 
@@ -624,6 +677,57 @@ Output:
 利用者視点では idempotent
 に近い動作にする。既に削除済みなら成功扱いにしてよい。
 
+### 13.8 `video_transcript`
+
+動画の発話を、時刻付きのテキスト（cue）として返す。音声の再生・波形・音の解析は扱わない。
+Stream の AI 字幕生成の結果を返すだけ。
+
+Input:
+
+``` ts
+{
+  video_id: string;
+  languages: Array<"cs"|"nl"|"en"|"fr"|"de"|"it"|"ja"|"ko"|"pl"|"pt"|"ru"|"es">; // 1-3、重複不可
+  start?: number;         // 秒。既定 0
+  end?: number;           // 秒。start < end <= duration。既定 duration
+  wait_seconds?: number;  // 0-25。video_info と同じ待ち方
+}
+```
+
+処理:
+
+1. `requireReady` で ready と duration を確かめる。
+2. `captions.list()` で状態を見て、無い言語だけ `generate` する（既存は成功扱い）。
+3. 全言語が ready / error になるか、`wait_seconds` が切れるまで待つ。
+4. ready の言語は VTT を取得してパース（`src/video/vtt.ts`）し、範囲と重なる cue を返す。
+
+Output:
+
+``` json
+{
+  "video_id": "abc123",
+  "transcripts": [
+    { "language": "ja", "status": "ready", "cues": [{ "start": 1.24, "end": 3.9, "text": "..." }] },
+    { "language": "en", "status": "inprogress" }
+  ],
+  "note": "... call video_transcript again with wait_seconds ..."
+}
+```
+
+- `start` / `end` は秒（ミリ秒精度）。`video_frame` の `at` とそのまま比べられる。
+- 長さ 0 の cue と空の cue は落とし、テキストの前後の空白は整える。
+- `status: "error"` の言語には `message` が付く。全言語が error なら `TRANSCRIPT_FAILED`。
+- 言語の自動判定はない。話されている言語を指定する。混在や不明のときは候補をまとめて
+  指定する（例: `["ja","en"]`）。各言語の結果は、その言語が話されている区間でしか信頼できない。
+- 時刻のずれはおおむね ±0.5 秒。
+
+エラー: `NO_AUDIO_TRACK`（音声がない）、`UNSUPPORTED_LANGUAGE`（対応言語の一覧を案内）、
+`TRANSCRIPT_FAILED`（生成が error / 本文を取得できない）。いずれもプロバイダー由来として
+`backend.error` ログの対象にする。
+
+字幕と声のずれの確認手順: `video_transcript` で発話の時刻を得る -> その前後を
+`video_frames` で見て、画面の字幕と照らし合わせる（server instructions に記載）。
+
 ### 13.7 `video_import_url`
 
 公開されている動画ファイルの URL を Cloudflare Stream に取り込む。
@@ -716,6 +820,9 @@ type SeekioErrorCode =
   | "URL_ALREADY_IMPORTED"
   | "UPLOAD_CREATE_FAILED"
   | "FRAME_FETCH_FAILED"
+  | "NO_AUDIO_TRACK"
+  | "UNSUPPORTED_LANGUAGE"
+  | "TRANSCRIPT_FAILED"
   | "BACKEND_ERROR";
 ```
 
@@ -731,7 +838,33 @@ Agent が次の行動を判断できる message を返す。
 | `VIDEO_TOO_LONG` | frame 系 tool で `duration` が上限（既定 300 秒）を超える | `video_delete` で削除し、短い動画を使う |
 
 `VIDEO_TOO_LONG` は `requireReady` で検査するため、直接アップロードの動画にも適用される。
-プロバイダー由来として `backend.error` ログの対象にするのは `UPLOAD_CREATE_FAILED` のみ。
+プロバイダー由来として `backend.error` ログの対象にするのは `UPLOAD_CREATE_FAILED` などで、実装は `BACKEND_ERROR_CODES` を参照する。
+
+### 16.1 フレーム取得の 404 再試行
+
+Stream は、動画が ready になった後もしばらく（最大で約 1〜2 分）サムネイルの取得が不安定になり、
+時刻や高さに関係なく HTTP 404 が断続的に出ることがある（pct_complete が 100 でも起きる。
+エッジのキャッシュではない）。そこで `CloudflareStreamBackend.getFrame` は、404 のときだけ
+同じ時刻で指数バックオフ（1s, 2s, 4s）の再試行を行う。
+
+| 呼び出し | 404 の再試行 |
+| --- | --- |
+| `video_frame` | 最大 3 回（1s, 2s, 4s） |
+| `video_frames` / `video_overview` | 1 コマあたり最大 1 回（1s） |
+
+上限値は `defaults`（`frameRetrySingleMax` / `frameRetryMultiMax` / `frameRetryBaseDelayMs`）。
+Workers のサブリクエスト数の上限（無料プランは 50）を意識し、複数コマの再試行は 1 回にしている。
+既存の「末尾 1 秒以内の 4xx で手前の時刻にずらす再試行」は残す。両者の順序は、
+同じ時刻の 404 再試行 -> 手前の時刻（各 1 回）で、手前の時刻では 404 の再試行をしない。
+映像トラックがコンテナの duration より短い動画では、映像が終わった後の時刻が HTTP 400 になる。
+
+再試行しても失敗したときの `FRAME_FETCH_FAILED` の案内:
+
+- 404: ready 直後は Stream 側で取得が数分不安定になることがある。30〜60 秒待って同じ呼び出しをやり直すか、`at` を 0.1 秒ずらす。
+- 400 で動画の末尾付近: 映像トラックが動画の長さより早く終わっている可能性がある。もっと前の時刻を試す。
+
+`video_info` の `ready`（フレームを取れる状態）と `pct_complete`（全画質の変換の進み具合。
+ready の時点で 100 未満のことがある）は別物。`ready` の判定は変えない。
 
 ## 17. Security
 
