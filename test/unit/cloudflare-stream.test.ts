@@ -100,6 +100,56 @@ describe("CloudflareStreamBackend.importFromUrl", () => {
   });
 });
 
+describe("errors that carry the kind only in the message (remote binding)", () => {
+  const messageError = (message: string) => new Error(message); // name stays "Error"
+
+  it("maps a message-prefixed NotFoundError to VIDEO_NOT_FOUND and makes delete idempotent", async () => {
+    const notFoundError = () =>
+      messageError("NotFoundError: Not Found: The requested resource or operation was not found.");
+    const { stream } = fakeStream({
+      details: async () => {
+        throw notFoundError();
+      },
+      delete: async () => {
+        throw notFoundError();
+      },
+    });
+    const backend = new CloudflareStreamBackend(stream, options);
+    await expect(backend.getInfo("abc")).rejects.toMatchObject({ code: "VIDEO_NOT_FOUND" });
+    await expect(backend.delete("abc")).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["BadRequestError", "INVALID_URL", /publicly reachable/i],
+    ["AlreadyUploadedError", "URL_ALREADY_IMPORTED", /already/i],
+    ["MaxFileSizeError", "UPLOAD_CREATE_FAILED", /size/i],
+    ["QuotaReachedError", "UPLOAD_CREATE_FAILED", /quota/i],
+    ["RateLimitedError", "UPLOAD_CREATE_FAILED", /rate/i],
+    ["WeirdError", "UPLOAD_CREATE_FAILED", /WeirdError/],
+  ])("maps message-prefixed %s to %s", async (kind, code, pattern) => {
+    const { stream } = fakeStream({}, undefined, async () => {
+      throw messageError(`${kind}: something https://example.com/v.mp4?sig=secret`);
+    });
+    const promise = new CloudflareStreamBackend(stream, options).importFromUrl({
+      url: "https://example.com/v.mp4",
+    });
+    await expect(promise).rejects.toMatchObject({ code });
+    await expect(promise).rejects.toThrow(pattern);
+    if (code === "UPLOAD_CREATE_FAILED") {
+      await expect(promise).rejects.not.toThrow(/sig=secret/);
+    }
+  });
+
+  it("falls back to unknown error when no kind is found", async () => {
+    const { stream } = fakeStream({}, undefined, async () => {
+      throw messageError("something odd");
+    });
+    await expect(
+      new CloudflareStreamBackend(stream, options).importFromUrl({ url: "https://e.com/v.mp4" }),
+    ).rejects.toThrow(/unknown error/);
+  });
+});
+
 describe("import errors do not leak the source URL", () => {
   it.each(["MaxFileSizeError", "QuotaReachedError", "RateLimitedError", "SomethingElseError"])(
     "%s omits the Stream message from tool results and logs",

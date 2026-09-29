@@ -29,12 +29,23 @@ function isVideoStatus(state: string): state is VideoStatus {
   return (VIDEO_STATUSES as readonly string[]).includes(state);
 }
 
+/**
+ * Stream error kind, e.g. "QuotaReachedError". In-process bindings keep it in `error.name`;
+ * through a remote binding `name` is a plain "Error" and the kind is the message prefix
+ * ("QuotaReachedError: ..."). Returns undefined when neither carries one.
+ */
+function streamErrorName(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  if (/^[A-Z]\w*Error$/.test(error.name) && error.name !== "Error") return error.name;
+  return /^(\w+Error):/.exec(error.message)?.[1];
+}
+
 function isNotFound(error: unknown): boolean {
-  return error instanceof Error && error.name === "NotFoundError";
+  return streamErrorName(error) === "NotFoundError";
 }
 
 function importError(error: unknown): SeekioError {
-  const name = error instanceof Error ? error.name : "";
+  const name = streamErrorName(error);
   // Only INVALID_URL may echo the Stream message: it is never logged. Other codes are logged
   // (backend.error) and the message can contain the source URL, so they use fixed text.
   const detail = error instanceof Error ? error.message : String(error);
@@ -61,7 +72,7 @@ function importError(error: unknown): SeekioError {
     default:
       return new SeekioError(
         "UPLOAD_CREATE_FAILED",
-        `Could not import the URL: Cloudflare Stream failed (${name || "unknown error"}). Try again later, or check the URL and use video_create_upload instead.`,
+        `Could not import the URL: Cloudflare Stream failed (${name ?? "unknown error"}). Try again later, or check the URL and use video_create_upload instead.`,
       );
   }
 }
