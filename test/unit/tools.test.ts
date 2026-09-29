@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaults } from "../../src/config";
+import { SeekioError } from "../../src/mcp/errors";
 import { FAKE_JPEG, FakeVideoBackend } from "./fake-backend";
 import { createHarness, jsonOf, textOf } from "./mcp-harness";
 
 const TOOL_NAMES = [
   "video_create_upload",
+  "video_import_url",
   "video_info",
   "video_overview",
   "video_frames",
@@ -23,7 +25,7 @@ beforeEach(() => {
 });
 
 describe("tools/list", () => {
-  it("exposes exactly the six v1 tools with descriptions", async () => {
+  it("exposes exactly the seven tools with descriptions", async () => {
     const { tools } = await harness.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
     for (const tool of tools) expect(tool.description).toBeTruthy();
@@ -51,6 +53,59 @@ describe("video_create_upload", () => {
     const result = await harness.callTool("video_create_upload", { max_duration_seconds: 301 });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("[INVALID_INTERVAL]");
+  });
+});
+
+describe("video_import_url", () => {
+  it("imports a URL and returns video_id and status", async () => {
+    const result = await harness.callTool("video_import_url", {
+      url: "https://example.com/foo.mp4",
+      filename: "foo.mp4",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(jsonOf(result)).toEqual({ video_id: "fake-1", status: "downloading" });
+    expect(backend.calls[0]).toEqual({
+      op: "importFromUrl",
+      input: { url: "https://example.com/foo.mp4", filename: "foo.mp4" },
+    });
+  });
+
+  it("does not put the URL in the logs", async () => {
+    const log = vi.spyOn(console, "log");
+    await harness.callTool("video_import_url", {
+      url: "https://example.com/foo.mp4?X-Amz-Signature=secret",
+    });
+    const lines = log.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => l.includes("upload.imported"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("secret");
+    expect(lines.join("\n")).not.toContain("example.com");
+  });
+
+  it.each([["ftp://example.com/foo.mp4"], ["not a url"], ["file:///etc/passwd"], [""]])(
+    "rejects invalid url %j without calling the backend",
+    async (url) => {
+      const result = await harness.callTool("video_import_url", { url });
+      expect(result.isError).toBe(true);
+      expect(backend.calls).toHaveLength(0);
+    },
+  );
+
+  it("rejects an empty filename", async () => {
+    const result = await harness.callTool("video_import_url", {
+      url: "https://example.com/foo.mp4",
+      filename: "",
+    });
+    expect(result.isError).toBe(true);
+    expect(backend.calls).toHaveLength(0);
+  });
+
+  it("surfaces backend errors with their code", async () => {
+    backend.importError = new SeekioError("INVALID_URL", "bad url");
+    const result = await harness.callTool("video_import_url", {
+      url: "https://example.com/foo.mp4",
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe("[INVALID_URL] bad url");
   });
 });
 
@@ -94,8 +149,29 @@ describe("frame tools gate on readiness", () => {
       );
       const failed = await harness.callTool(tool, { ...args, video_id: "e" });
       expect(textOf(failed)).toMatch(/^\[VIDEO_PROCESSING_FAILED\]/);
+      expect(textOf(failed)).toContain("video_import_url");
     }
     expect(backend.calls.filter((c) => c.op === "getFrame")).toHaveLength(0);
+  });
+});
+
+describe("frame tools reject videos longer than the limit", () => {
+  it("returns VIDEO_TOO_LONG advising video_delete", async () => {
+    backend.addVideo({ id: "long", duration: 412.3 });
+    backend.addVideo({ id: "edge", duration: defaults.maxVideoDurationSeconds });
+    for (const tool of ["video_overview", "video_frames", "video_frame"]) {
+      const result = await harness.callTool(tool, { video_id: "long", start: 0, end: 1, at: 0 });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toBe(
+        "[VIDEO_TOO_LONG] Video is 412.3s long, but Seekio allows at most 300 seconds. Delete it with video_delete and use a shorter video.",
+      );
+    }
+    backend.addVideo({ id: "over", duration: 300.04 });
+    const rounded = await harness.callTool("video_overview", { video_id: "over" });
+    expect(textOf(rounded)).toContain("300.1s");
+    const atLimit = await harness.callTool("video_overview", { video_id: "edge" });
+    expect(atLimit.isError).toBeUndefined();
+    expect(backend.calls.filter((c) => c.op === "getFrame").length).toBeGreaterThan(0);
   });
 });
 

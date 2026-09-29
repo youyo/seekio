@@ -1,5 +1,6 @@
 export type LogEvent =
   | "upload.created"
+  | "upload.imported"
   | "video.info"
   | "overview.requested"
   | "frames.requested"

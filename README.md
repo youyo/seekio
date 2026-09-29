@@ -42,6 +42,7 @@ Claude Code / Codex / MCP Client
 │ POST /mcp                    │
 │                              │
 │ video_create_upload          │
+│ video_import_url             │
 │ video_info                   │
 │ video_overview               │
 │ video_frames                 │
@@ -58,7 +59,7 @@ Claude Code / Codex / MCP Client
 ```
 
 - Stateless Remote MCP server on Cloudflare Workers (`createMcpHandler` from the Agents SDK, MCP SDK v2).
-- Video bytes go directly from the client to Cloudflare Stream through a one-time upload URL; they never pass through the Worker.
+- Video bytes never pass through the Worker: the client uploads directly to Cloudflare Stream through a one-time upload URL (`video_create_upload`), or Stream downloads a public file URL itself (`video_import_url`).
 - Frames are Stream on-demand thumbnails fetched with a signed token and returned as base64 `image/jpeg` content.
 - No database, no Durable Objects, no R2. Videos are temporary artifacts that you delete with `video_delete`.
 
@@ -196,6 +197,21 @@ All tools return JSON or text in `text` content; frames are `image` content (`im
 
 Upload the file with `POST upload_url` as `multipart/form-data` (field `file`) before `expires_at` (15 minutes by default). Uploads over 200 MB are not supported in v1.
 
+### `video_import_url`
+
+Imports a video from a public URL that serves a video file directly (for example `https://example.com/foo.mp4`). Web pages such as YouTube are not supported. Cloudflare Stream downloads the file asynchronously, so poll `video_info` until `ready`.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `url` | string | `http` or `https` only |
+| `filename` | string, optional | 1 to 255 characters, stored as metadata |
+
+```json
+{ "video_id": "abc123", "status": "downloading" }
+```
+
+The duration limit cannot be enforced up front for imports: once the video is `ready`, frame tools reject it with `[VIDEO_TOO_LONG]` when it exceeds the limit, and the message tells the agent to `video_delete` it. Related errors: `[INVALID_URL]` (not a publicly reachable direct video file), `[URL_ALREADY_IMPORTED]` (Stream already has this URL), `[UPLOAD_CREATE_FAILED]` (file too large, quota reached, rate limited, or other Stream failure). URLs are never written to logs.
+
 ### `video_info`
 
 | Input | Type |
@@ -258,7 +274,7 @@ Deleting an already deleted video succeeds.
 
 User: "Around 3 seconds the drawer flashes to the left for a moment. Find the cause and fix it." (with a screen recording attached)
 
-1. The agent calls `video_create_upload`, uploads the recording, and polls `video_info` until `ready`.
+1. The agent calls `video_create_upload` (or `video_import_url` for a public file URL), uploads the recording, and polls `video_info` until `ready`.
 2. `video_overview` returns 12 frames across the 14.8 s clip; the drawer looks wrong only in the frame at 2.7 s.
 3. `video_frames` with `start: 2.4, end: 3.6, fps: 20` (25 frames) shows the drawer briefly rendered at `translateX(-100%)` for two frames before the open transition starts.
 4. `video_frame` at `2.95` confirms the exact intermediate state.
@@ -272,7 +288,7 @@ The server instructions embedded in Seekio steer agents toward this progressive 
 | Limit | Default | Where |
 | --- | --- | --- |
 | Upload size | 200 MB | Stream direct upload (v1 does not support tus) |
-| Video duration | 300 s | `MAX_VIDEO_DURATION_SECONDS` var |
+| Video duration | 300 s | `MAX_VIDEO_DURATION_SECONDS` var (enforced by Stream for `video_create_upload`; checked after processing for `video_import_url`, where longer videos fail with `VIDEO_TOO_LONG`) |
 | Upload URL lifetime | 900 s | `UPLOAD_URL_TTL_SECONDS` var |
 | Overview frames | 12 (max 30) | `src/config.ts` |
 | Frames per `video_frames` call | 30 | `src/config.ts` |
@@ -300,7 +316,7 @@ mise run portal:dry-run   # show changes only
 mise run portal           # apply
 ```
 
-The script creates the MCP server entry if missing, updates it when the URL or auth type drifts, syncs its tool list, and ensures the portal mapping exposes all six tools without aliases. Running it twice is a no-op. Worker deploys (`mise run deploy`) never touch the portal.
+The script creates the MCP server entry if missing, updates it when the URL or auth type drifts, syncs its tool list, and ensures the portal mapping exposes all seven tools without aliases. Running it twice is a no-op. Worker deploys (`mise run deploy`) never touch the portal.
 
 ## Security
 

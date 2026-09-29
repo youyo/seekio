@@ -32,10 +32,11 @@ Repository investigation / fix
 
 ## 2. v1 完成条件
 
-途中の vertical slice ではリリースせず、最初から以下の6 toolsを揃える。
+途中の vertical slice ではリリースせず、最初から以下の6 toolsを揃える（その後 `video_import_url` を追加し、現在は7 tools）。
 
 ``` text
 video_create_upload
+video_import_url
 video_info
 video_overview
 video_frames
@@ -97,6 +98,7 @@ Claude Code / Codex / MCP Client
 │ /mcp                         │
 │                              │
 │ video_create_upload          │
+│ video_import_url             │
 │ video_info                   │
 │ video_overview               │
 │ video_frames                 │
@@ -264,6 +266,7 @@ Cloudflare Stream 依存を1箇所に閉じ込める。
 ``` ts
 export interface VideoBackend {
   createUpload(input: CreateUploadInput): Promise<Upload>;
+  importFromUrl(input: ImportUrlInput): Promise<ImportedVideo>;
   getInfo(videoId: string): Promise<VideoInfo>;
   getFrame(videoId: string, timestamp: number): Promise<Frame>;
   delete(videoId: string): Promise<void>;
@@ -581,6 +584,45 @@ Output:
 利用者視点では idempotent
 に近い動作にする。既に削除済みなら成功扱いにしてよい。
 
+### 13.7 `video_import_url`
+
+公開されている動画ファイルの URL を Cloudflare Stream に取り込む。
+YouTube 等のページ URL は対象外。
+
+Input:
+
+``` ts
+{
+  url: string;       // http / https のみ
+  filename?: string; // 1〜255 文字、metadata
+}
+```
+
+Output:
+
+``` json
+{ "video_id": "abc123", "status": "downloading" }
+```
+
+取り込みは Stream Binding の `env.STREAM.upload(url, params)` で行う。
+取り込みは非同期なので、agent は `video_info` が `ready` になるまでポーリングする。
+
+作成時:
+
+``` text
+requireSignedURLs = true
+meta.filename = filename
+meta.application = seekio
+```
+
+`StreamUrlUploadParams` には `maxDurationSeconds` も expiry も無いため、
+duration 上限は事前に強制できない。ready になった後、frame 系 tool が
+`requireReady` で検査し、上限超過なら `VIDEO_TOO_LONG` を返す（自動削除はしない）。
+Worker からの HEAD 事前チェックは行わない。
+
+URL には署名付きクエリが含まれうるため、URL はログに出さない
+（`upload.imported` は `video_id` と `duration_ms` のみ）。
+
 ## 14. MCP image response
 
 URL を返すのではなく、Seekio が JPEG を取得して MCP image content
@@ -629,12 +671,27 @@ type SeekioErrorCode =
   | "INVALID_TIMESTAMP"
   | "INVALID_INTERVAL"
   | "TOO_MANY_FRAMES"
+  | "VIDEO_TOO_LONG"
+  | "INVALID_URL"
+  | "URL_ALREADY_IMPORTED"
   | "UPLOAD_CREATE_FAILED"
   | "FRAME_FETCH_FAILED"
   | "BACKEND_ERROR";
 ```
 
 Agent が次の行動を判断できる message を返す。
+
+`video_import_url` 由来のコード:
+
+| code | 条件 | 案内 |
+| --- | --- | --- |
+| `INVALID_URL` | Stream が `BadRequestError` を返した | 公開されていて直接ダウンロードできる動画ファイルの URL か確認する |
+| `URL_ALREADY_IMPORTED` | Stream が `AlreadyUploadedError` を返した | 既存の動画を使う、または `video_delete` で消してから再取り込みする（削除後の再取り込み可否は保証しない） |
+| `UPLOAD_CREATE_FAILED` | `MaxFileSizeError` / `QuotaReachedError` / `RateLimitedError` / その他 | 原因に応じた文面 |
+| `VIDEO_TOO_LONG` | frame 系 tool で `duration` が上限（既定 300 秒）を超える | `video_delete` で削除し、短い動画を使う |
+
+`VIDEO_TOO_LONG` は `requireReady` で検査するため、直接アップロードの動画にも適用される。
+プロバイダー由来として `backend.error` ログの対象にするのは `UPLOAD_CREATE_FAILED` のみ。
 
 ## 17. Security
 

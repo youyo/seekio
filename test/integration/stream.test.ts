@@ -5,6 +5,11 @@
  *   SEEKIO_FIXTURE_VIDEO=./fixtures/drawer.mp4 \
  *   SEEKIO_AUTH_TOKEN=... CF_ACCESS_CLIENT_ID=... CF_ACCESS_CLIENT_SECRET=... \
  *   mise run test:integration
+ *
+ * Set SEEKIO_FIXTURE_VIDEO_URL (a public direct video file URL) to also run the video_import_url scenario.
+ * Cloudflare Stream rejects a URL it has already imported (URL_ALREADY_IMPORTED), so the scenario
+ * cannot be re-run with the same URL while the earlier video exists; the test deletes its video
+ * at the end, but if a run aborts midway, delete the leftover video or use a different URL.
  */
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -13,6 +18,7 @@ import { McpHttpClient, type ToolResult } from "./mcp-client";
 
 const MCP_URL = process.env.SEEKIO_MCP_URL;
 const FIXTURE = process.env.SEEKIO_FIXTURE_VIDEO;
+const FIXTURE_URL = process.env.SEEKIO_FIXTURE_VIDEO_URL;
 const READY_TIMEOUT_MS = 5 * 60 * 1000;
 const POLL_INTERVAL_MS = 5000;
 
@@ -61,7 +67,7 @@ describeIf("Seekio against real Cloudflare Stream", () => {
       const client = new McpHttpClient({ url: MCP_URL as string, headers: authHeaders() });
       const init = await client.initialize();
       expect(init.serverInfo.name).toBe("seekio");
-      expect((await client.listTools()).tools).toHaveLength(6);
+      expect((await client.listTools()).tools).toHaveLength(7);
 
       const upload = json<{ video_id: string; upload_url: string }>(
         await client.callTool("video_create_upload", { filename: basename(FIXTURE as string) }),
@@ -117,6 +123,63 @@ describeIf("Seekio against real Cloudflare Stream", () => {
       );
       expect(first.deleted).toBe(true);
       expect(second.deleted).toBe(true);
+    },
+    10 * 60 * 1000,
+  );
+});
+
+const describeUrlIf = MCP_URL && FIXTURE_URL ? describe : describe.skip;
+
+describeUrlIf("Seekio video_import_url against real Cloudflare Stream", () => {
+  it(
+    "imports a URL, inspects, and deletes the video end to end",
+    async () => {
+      const client = new McpHttpClient({ url: MCP_URL as string, headers: authHeaders() });
+      await client.initialize();
+
+      const imported = json<{ video_id: string; status: string }>(
+        await client.callTool("video_import_url", { url: FIXTURE_URL as string }),
+      );
+      expect(imported.video_id).toBeTruthy();
+
+      const deadline = Date.now() + READY_TIMEOUT_MS;
+      let info: { status: string; duration?: number; ready: boolean } = {
+        status: "",
+        ready: false,
+      };
+      while (Date.now() < deadline) {
+        info = json(await client.callTool("video_info", { video_id: imported.video_id }));
+        if (info.ready || info.status === "error") break;
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      }
+      expect(info.ready).toBe(true);
+      const duration = info.duration as number;
+
+      const overview = await client.callTool("video_overview", {
+        video_id: imported.video_id,
+        max_frames: 4,
+      });
+      expectJpegImages(overview, Math.min(4, Math.max(1, Math.ceil(duration * 1000))));
+
+      const end = Math.min(duration, 1);
+      const frames = await client.callTool("video_frames", {
+        video_id: imported.video_id,
+        start: 0,
+        end,
+        fps: 2,
+      });
+      expectJpegImages(frames, Math.floor(end * 2) + 1);
+
+      const frame = await client.callTool("video_frame", {
+        video_id: imported.video_id,
+        at: duration / 2,
+      });
+      expectJpegImages(frame, 1);
+
+      const deleted = json<{ deleted: boolean }>(
+        await client.callTool("video_delete", { video_id: imported.video_id }),
+      );
+      expect(deleted.deleted).toBe(true);
     },
     10 * 60 * 1000,
   );

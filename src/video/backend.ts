@@ -3,6 +3,16 @@ export type CreateUploadInput = {
   maxDurationSeconds?: number;
 };
 
+export type ImportUrlInput = {
+  url: string;
+  filename?: string;
+};
+
+export type ImportedVideo = {
+  videoId: string;
+  status: VideoStatus;
+};
+
 export type Upload = {
   videoId: string;
   uploadUrl: string;
@@ -35,6 +45,7 @@ export type Frame = {
 /** The single seam between Seekio and the video provider. v1 ships only `CloudflareStreamBackend`. */
 export interface VideoBackend {
   createUpload(input: CreateUploadInput): Promise<Upload>;
+  importFromUrl(input: ImportUrlInput): Promise<ImportedVideo>;
   getInfo(videoId: string): Promise<VideoInfo>;
   getFrame(videoId: string, timestamp: number): Promise<Frame>;
   delete(videoId: string): Promise<void>;

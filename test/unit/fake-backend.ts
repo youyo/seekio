@@ -2,6 +2,8 @@ import { messages, SeekioError } from "../../src/mcp/errors";
 import type {
   CreateUploadInput,
   Frame,
+  ImportedVideo,
+  ImportUrlInput,
   Upload,
   VideoBackend,
   VideoInfo,
@@ -12,6 +14,7 @@ export const FAKE_JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xf
 
 export type FakeCall =
   | { op: "createUpload"; input: CreateUploadInput }
+  | { op: "importFromUrl"; input: ImportUrlInput }
   | { op: "getInfo"; videoId: string }
   | { op: "getFrame"; videoId: string; timestamp: number }
   | { op: "delete"; videoId: string };
@@ -20,6 +23,8 @@ export type FakeCall =
 export class FakeVideoBackend implements VideoBackend {
   readonly videos = new Map<string, VideoInfo>();
   readonly calls: FakeCall[] = [];
+  /** When set, `importFromUrl` throws it instead of creating a video. */
+  importError: Error | undefined;
   private nextId = 1;
 
   /** Adds a video; ready videos get a 10s duration and phone-like dimensions unless overridden. */
@@ -41,6 +46,14 @@ export class FakeVideoBackend implements VideoBackend {
       uploadUrl: `https://upload.example/${videoId}`,
       expiresAt: "2026-01-01T00:15:00.000Z",
     };
+  }
+
+  async importFromUrl(input: ImportUrlInput): Promise<ImportedVideo> {
+    this.calls.push({ op: "importFromUrl", input });
+    if (this.importError) throw this.importError;
+    const videoId = `fake-${this.nextId++}`;
+    this.videos.set(videoId, { id: videoId, status: "downloading" });
+    return { videoId, status: "downloading" };
   }
 
   async getInfo(videoId: string): Promise<VideoInfo> {

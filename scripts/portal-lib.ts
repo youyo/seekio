@@ -5,6 +5,7 @@
 
 export const SEEKIO_TOOLS = [
   "video_create_upload",
+  "video_import_url",
   "video_info",
   "video_overview",
   "video_frames",

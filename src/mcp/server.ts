@@ -9,6 +9,7 @@ import { registerCreateUpload } from "./tools/create-upload";
 import { registerDelete } from "./tools/delete";
 import { registerFrame } from "./tools/frame";
 import { registerFrames } from "./tools/frames";
+import { registerImportUrl } from "./tools/import-url";
 import { registerInfo } from "./tools/info";
 import { registerOverview } from "./tools/overview";
 
@@ -70,12 +71,20 @@ export async function requireReady(
   if (info.status !== "ready" || info.duration === undefined) {
     throw new SeekioError("VIDEO_NOT_READY", messages.notReady);
   }
+  const limit = deps.config.maxVideoDurationSeconds;
+  if (info.duration > limit) {
+    throw new SeekioError(
+      "VIDEO_TOO_LONG",
+      messages.tooLong(Math.ceil(info.duration * 10) / 10, limit),
+    );
+  }
   return { ...info, duration: info.duration };
 }
 
 export function createSeekioServer(deps: ToolDeps): McpServer {
   const server = new McpServer(serverInfo, { instructions });
   registerCreateUpload(server, deps);
+  registerImportUrl(server, deps);
   registerInfo(server, deps);
   registerOverview(server, deps);
   registerFrames(server, deps);

@@ -114,7 +114,7 @@ export async function main(argv: string[], rawEnv: NodeJS.ProcessEnv): Promise<n
     }
   }
 
-  // 2. Sync tools and verify the six Seekio tools are visible.
+  // 2. Sync tools and verify the seven Seekio tools are visible.
   if (server && !dryRun) {
     const synced = await api<PortalServer>(
       env,

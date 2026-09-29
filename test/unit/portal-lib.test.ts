@@ -91,7 +91,7 @@ describe("desiredServer / serverDiff", () => {
 describe("missingTools", () => {
   it("names the Seekio tools the portal has not seen yet", () => {
     expect(missingTools({ tools: SEEKIO_TOOLS.map((name) => ({ name })) })).toEqual([]);
-    expect(missingTools({ tools: [{ name: "video_info" }] })).toHaveLength(5);
+    expect(missingTools({ tools: [{ name: "video_info" }] })).toHaveLength(SEEKIO_TOOLS.length - 1);
   });
 });
 
@@ -103,7 +103,7 @@ describe("mergePortalServers", () => {
     servers: [{ server_id: "other", on_behalf: true }],
   };
 
-  it("adds the mapping with all six tools enabled and keeps other servers", () => {
+  it("adds the mapping with all seven tools enabled and keeps other servers", () => {
     const merged = mergePortalServers(portal, "seekio");
     expect(merged).toHaveLength(2);
     expect(merged?.[0]).toEqual({ server_id: "other", on_behalf: true });

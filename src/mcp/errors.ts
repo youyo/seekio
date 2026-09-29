@@ -5,6 +5,9 @@ export type SeekioErrorCode =
   | "INVALID_TIMESTAMP"
   | "INVALID_INTERVAL"
   | "TOO_MANY_FRAMES"
+  | "INVALID_URL"
+  | "URL_ALREADY_IMPORTED"
+  | "VIDEO_TOO_LONG"
   | "UPLOAD_CREATE_FAILED"
   | "FRAME_FETCH_FAILED"
   | "BACKEND_ERROR";
@@ -26,7 +29,14 @@ export function isSeekioError(error: unknown): error is SeekioError {
 
 export const messages = {
   notReady: "Video is still processing. Call video_info again before requesting frames.",
-  processingFailed: "Video processing failed. Upload the video again with video_create_upload.",
+  processingFailed:
+    "Video processing failed. Upload it again with video_create_upload or video_import_url.",
+  invalidUrl: (detail: string) =>
+    `Cloudflare Stream rejected the URL (${detail}). Check that it is a publicly reachable http(s) URL that downloads a video file directly (not a web page such as YouTube), then call video_import_url again.`,
+  urlAlreadyImported:
+    "This URL has already been imported into Cloudflare Stream. Use the existing video if you still have its video_id; otherwise delete the earlier video with video_delete and try importing again (re-import after deletion is not guaranteed to succeed).",
+  tooLong: (duration: number, limit: number) =>
+    `Video is ${duration}s long, but Seekio allows at most ${limit} seconds. Delete it with video_delete and use a shorter video.`,
   notFound: (videoId: string) =>
     `Video ${videoId} was not found. Check the video_id or create a new upload.`,
 } as const;

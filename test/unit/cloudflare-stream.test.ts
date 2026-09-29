@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudflareStreamBackend } from "../../src/video/cloudflare-stream";
+import { createHarness } from "./mcp-harness";
 
 const options = { frameHeight: 1080, uploadUrlTtlSeconds: 900, maxVideoDurationSeconds: 300 };
 
@@ -28,10 +29,12 @@ type Handle = Partial<Record<"details" | "delete" | "generateToken", () => Promi
 function fakeStream(
   handle: Handle,
   createDirectUpload?: (params: StreamDirectUploadCreateParams) => Promise<unknown>,
+  upload?: (url: string, params?: StreamUrlUploadParams) => Promise<unknown>,
 ) {
   const calls: string[] = [];
   const stream = {
     createDirectUpload: createDirectUpload ?? vi.fn(),
+    upload: upload ?? vi.fn(),
     video: (id: string) => {
       calls.push(id);
       return handle as unknown as StreamVideoHandle;
@@ -42,6 +45,83 @@ function fakeStream(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+function namedError(name: string, message = name): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+describe("CloudflareStreamBackend.importFromUrl", () => {
+  it("imports with requireSignedURLs and seekio metadata, returning id and status", async () => {
+    const upload = vi.fn(async (_url: string, _params?: StreamUrlUploadParams) =>
+      video({ id: "imp", status: { state: "downloading" } as StreamVideo["status"] }),
+    );
+    const { stream } = fakeStream({}, undefined, upload);
+    const result = await new CloudflareStreamBackend(stream, options).importFromUrl({
+      url: "https://example.com/foo.mp4",
+      filename: "foo.mp4",
+    });
+    expect(result).toEqual({ videoId: "imp", status: "downloading" });
+    expect(upload).toHaveBeenCalledTimes(1);
+    const [url, params] = upload.mock.calls[0] as [string, StreamUrlUploadParams];
+    expect(url).toBe("https://example.com/foo.mp4");
+    expect(params.requireSignedURLs).toBe(true);
+    expect(params.meta).toEqual({ application: "seekio", filename: "foo.mp4" });
+  });
+
+  it("omits filename from meta when not given", async () => {
+    const upload = vi.fn(async (_url: string, _params?: StreamUrlUploadParams) => video());
+    const { stream } = fakeStream({}, undefined, upload);
+    await new CloudflareStreamBackend(stream, options).importFromUrl({
+      url: "https://example.com/foo.mp4",
+    });
+    const params = upload.mock.calls[0]?.[1] as StreamUrlUploadParams;
+    expect(params.meta).toEqual({ application: "seekio" });
+  });
+
+  it.each([
+    ["BadRequestError", "INVALID_URL", /publicly reachable|direct/i],
+    ["AlreadyUploadedError", "URL_ALREADY_IMPORTED", /already/i],
+    ["MaxFileSizeError", "UPLOAD_CREATE_FAILED", /size/i],
+    ["QuotaReachedError", "UPLOAD_CREATE_FAILED", /quota/i],
+    ["RateLimitedError", "UPLOAD_CREATE_FAILED", /rate/i],
+    ["SomethingElseError", "UPLOAD_CREATE_FAILED", /SomethingElseError/],
+  ])("maps %s to %s", async (name, code, pattern) => {
+    const { stream } = fakeStream({}, undefined, async () => {
+      throw namedError(name, "boom");
+    });
+    const promise = new CloudflareStreamBackend(stream, options).importFromUrl({
+      url: "https://example.com/foo.mp4",
+    });
+    await expect(promise).rejects.toMatchObject({ code });
+    await expect(promise).rejects.toThrow(pattern);
+  });
+});
+
+describe("import errors do not leak the source URL", () => {
+  it.each(["MaxFileSizeError", "QuotaReachedError", "RateLimitedError", "SomethingElseError"])(
+    "%s omits the Stream message from tool results and logs",
+    async (name) => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const { stream } = fakeStream({}, undefined, async () => {
+        throw namedError(name, "failed https://example.com/v.mp4?sig=secret");
+      });
+      const harness = createHarness(new CloudflareStreamBackend(stream, options));
+      const result = await harness.callTool("video_import_url", {
+        url: "https://example.com/v.mp4?sig=secret",
+      });
+      expect(result.isError).toBe(true);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toMatch(/^\[UPLOAD_CREATE_FAILED\]/);
+      expect(text).not.toContain("sig=secret");
+      const logged = [...errorSpy.mock.calls, ...logSpy.mock.calls].map((c) => String(c[0]));
+      expect(logged.some((l) => l.includes("backend.error"))).toBe(true);
+      expect(logged.join("\n")).not.toContain("sig=secret");
+    },
+  );
 });
 
 describe("CloudflareStreamBackend", () => {

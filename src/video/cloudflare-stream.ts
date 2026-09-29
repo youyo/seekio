@@ -2,6 +2,8 @@ import { messages, SeekioError } from "../mcp/errors";
 import type {
   CreateUploadInput,
   Frame,
+  ImportedVideo,
+  ImportUrlInput,
   Upload,
   VideoBackend,
   VideoInfo,
@@ -29,6 +31,39 @@ function isVideoStatus(state: string): state is VideoStatus {
 
 function isNotFound(error: unknown): boolean {
   return error instanceof Error && error.name === "NotFoundError";
+}
+
+function importError(error: unknown): SeekioError {
+  const name = error instanceof Error ? error.name : "";
+  // Only INVALID_URL may echo the Stream message: it is never logged. Other codes are logged
+  // (backend.error) and the message can contain the source URL, so they use fixed text.
+  const detail = error instanceof Error ? error.message : String(error);
+  switch (name) {
+    case "BadRequestError":
+      return new SeekioError("INVALID_URL", messages.invalidUrl(detail));
+    case "AlreadyUploadedError":
+      return new SeekioError("URL_ALREADY_IMPORTED", messages.urlAlreadyImported);
+    case "MaxFileSizeError":
+      return new SeekioError(
+        "UPLOAD_CREATE_FAILED",
+        "Could not import the URL: the file exceeds the maximum file size Cloudflare Stream accepts. Use a smaller video.",
+      );
+    case "QuotaReachedError":
+      return new SeekioError(
+        "UPLOAD_CREATE_FAILED",
+        "Could not import the URL: the Cloudflare Stream storage quota is reached. Delete unused videos with video_delete and try again.",
+      );
+    case "RateLimitedError":
+      return new SeekioError(
+        "UPLOAD_CREATE_FAILED",
+        "Could not import the URL: Cloudflare Stream rate limit hit. Wait a moment and try again.",
+      );
+    default:
+      return new SeekioError(
+        "UPLOAD_CREATE_FAILED",
+        `Could not import the URL: Cloudflare Stream failed (${name || "unknown error"}). Try again later, or check the URL and use video_create_upload instead.`,
+      );
+  }
 }
 
 function backendError(error: unknown, action: string): SeekioError {
@@ -64,6 +99,25 @@ export class CloudflareStreamBackend implements VideoBackend {
       const detail = error instanceof Error ? error.message : String(error);
       throw new SeekioError("UPLOAD_CREATE_FAILED", `Could not create an upload URL: ${detail}`);
     }
+  }
+
+  async importFromUrl(input: ImportUrlInput): Promise<ImportedVideo> {
+    const meta: Record<string, string> = { application: "seekio" };
+    if (input.filename) meta.filename = input.filename;
+    let video: StreamVideo;
+    try {
+      video = await this.stream.upload(input.url, { requireSignedURLs: true, meta });
+    } catch (error) {
+      throw importError(error);
+    }
+    const state = video.status.state;
+    if (!isVideoStatus(state)) {
+      throw new SeekioError(
+        "BACKEND_ERROR",
+        `Cloudflare Stream returned an unknown status "${state}".`,
+      );
+    }
+    return { videoId: video.id, status: state };
   }
 
   async getInfo(videoId: string): Promise<VideoInfo> {
