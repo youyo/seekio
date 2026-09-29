@@ -13,6 +13,7 @@ Seekio は Cloudflare Workers 上で動くステートレスな Remote MCP サ�
 ```bash
 mise run install            # pnpm install --frozen-lockfile
 mise run dev                # wrangler dev (http://localhost:8787)。Stream binding は remote: true で実サービスに接続
+                            # Images binding も remote: true。dev でも実サービスを使い、変換は無料枠（月 5,000 ユニーク）を消費する
 mise run typecheck          # tsc --noEmit
 mise run lint               # biome check .（フォーマットチェックを含む）
 mise run test               # vitest run（unit のみ: test/unit/**）
@@ -27,7 +28,7 @@ mise run portal[:dry-run]   # MCP Server Portal への登録（冪等）
 補足:
 - `mise.toml` には `test:unit` / `test:e2e` タスクがない。`test` は unit のみで、結合テストは `test:integration` として分離されている。
 - `vitest.config.ts` は環境変数 `SEEKIO_INTEGRATION` の有無で `include` を切り替える。unit は `test/unit/**`、integration は `test/integration/**`。
-- 結合テストは、デプロイ済みの Seekio（または `wrangler dev`）に対して、実際の MCP HTTP 通信で upload → info ポーリング → overview → frames → frame → delete を実行する。必要な環境変数は `SEEKIO_MCP_URL` と `SEEKIO_FIXTURE_VIDEO`（`SEEKIO_FIXTURE_VIDEO_URL` を設定すると `video_import_url` のシナリオも走る）。任意で `SEEKIO_AUTH_TOKEN` と `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` も渡せる。
+- 結合テストは、デプロイ済みの Seekio（または `wrangler dev`）に対して、実際の MCP HTTP 通信で upload → info ポーリング → overview → frames → frame → delete を実行する。ローカルに `curl`（7.76 以上）と `sh` が必要（`upload_command` を実際にシェルで実行する）。必要な環境変数は `SEEKIO_MCP_URL` と `SEEKIO_FIXTURE_VIDEO`（`SEEKIO_FIXTURE_VIDEO_URL` を設定すると `video_import_url` のシナリオも走る）。任意で `SEEKIO_AUTH_TOKEN` と `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` も渡せる。
 - ローカルのシークレットは `.dev.vars` に置く（git 管理外）。
 - 本番デプロイは Cloudflare Workers Builds（GitHub 連携）で行う。GitHub Actions は `mise run check` を実行するだけで、デプロイはしない。
 
@@ -45,7 +46,9 @@ mise run portal[:dry-run]   # MCP Server Portal への登録（冪等）
 - **エラーメッセージはエージェントへの指示になっている。** `SeekioError` のメッセージには「次に何をすべきか」を書く（`src/mcp/errors.ts` の `messages` を参照）。新しいエラーコードは `SeekioErrorCode` に追加する。プロバイダー由来のコードは `server.ts` の `BACKEND_ERROR_CODES` に入れ、`backend.error` としてログ出力されるようにする。
 - **タイムスタンプの計算は `src/video/timestamps.ts` に集約する。** ミリ秒に切り捨て（Stream は指定時刻以降の最初のフレームを返すため、四捨五入だと 1 フレーム先に飛ぶ）、動画末尾より 1ms 手前にクランプし、重複を除いてソートする。フレームの時刻は加算の積み重ねではなく `start + i / fps` で計算する（浮動小数点誤差を溜めないため）。上限を超えたときに fps やフレーム数を勝手に下げることはせず、`TOO_MANY_FRAMES` を返す。
 - **フレーム取得**（`src/video/frame.ts`）: `fetchFramesBounded` で同時実行数を制限しつつ、結果は入力と同じ順序で返す。`CloudflareStreamBackend.getFrame` は動画末尾 1 秒以内で Stream が HTTP 4xx を返した場合に少し手前（-0.1/-0.5/-1.0s）で再試行し、`Frame.timestamp` は実際に取得した時刻になる（`fetchFramesBounded` は同一時刻の重複を除く）。フレームの高さは `min(ソース動画の高さ, frameHeight=720)`（アップスケールしない）。画像は base64 の `image/jpeg` MCP image content にし、`Frame at <t>s` のテキストと対にする。
-- **設定**（`src/config.ts`）: 上限値は `defaults` に定義する。Worker の vars で上書きできるのは `MAX_VIDEO_DURATION_SECONDS` と `UPLOAD_URL_TTL_SECONDS` の 2 つだけで、不正な値ならデフォルトに戻る。制限値はツールの description にも埋め込まれている。
+- **自動削除**（`src/video/cleanup.ts` + `src/index.ts` の `scheduled`）: Cron Trigger（`wrangler.jsonc` の `triggers.crons`、毎時）が `deleteExpiredVideos` を呼び、`VIDEO_RETENTION_HOURS`（既定 24）より古い動画を消す。対象は `VideoBackend.listVideos()` が返す動画だけで、`CloudflareStreamBackend` は `meta.application === "seekio"` の動画に限定する（同じ Stream アカウントの他の動画を消さないための最重要条件）。`createdAt` が解釈できない動画は消さない。保険として作成時に `scheduledDeletion`（31 日後。Stream は 30 日以上先しか受け付けない）も付ける。実アカウントに対して `wrangler dev --test-scheduled` などで cron を動かさない（本物の動画が消える）。
+- **`video_frame` の region（切り出し）**: `ImageCropper`（`src/video/image.ts`）は `VideoBackend` とは別の境界で、実装は Cloudflare Images の Workers binding（`env.IMAGES`、`wrangler.jsonc` の `images`）を使う `ImagesBindingCropper`。`region` があるときは `getFrame(id, t, { fullResolution: true })` でソースの高さのまま取得し（既存の末尾リトライはそのまま効く）、`info()` で実寸を得て `trim`（各辺から除去する px 数 left/top/right/bottom で指定）（ピクセル換算は `src/video/region.ts` の純粋関数）で切り出し、出力寸法も `info()`（無料）で実測する。長辺が `regionMaxLongEdge`（1568）を超えるときだけ `fit: "scale-down"` で縮小し、拡大はしない。`env.IMAGES` が無ければ cropper は無く `REGION_UNAVAILABLE`、変換失敗は `REGION_CROP_FAILED`（`BACKEND_ERROR_CODES`）。無料枠（月 5,000 ユニーク変換）超過時の挙動は未確認で、エラー文字列による分岐は作らない。`video_frames` / `video_overview` には region を付けない。
+- **設定**（`src/config.ts`）: 上限値は `defaults` に定義する。Worker の vars で上書きできるのは `MAX_VIDEO_DURATION_SECONDS`・`UPLOAD_URL_TTL_SECONDS`・`VIDEO_RETENTION_HOURS` の 3 つだけで、不正な値ならデフォルトに戻る。制限値はツールの description にも埋め込まれている。
 - **認証**（`src/auth.ts`）には任意の 2 層があり、両方設定されていれば両方を要求する。1 つは `SEEKIO_AUTH_TOKEN`（Bearer、タイミングセーフ比較）。もう 1 つは `CF_ACCESS_TEAM_DOMAIN` + `CF_ACCESS_AUD` による Cloudflare Access JWT の RS256 検証で、certs は 5 分キャッシュし、未知の kid による強制再取得は最短 60 秒間隔に制限する。
 - **ログ**（`src/log.ts`）: 型付きのイベント名で 1 行 JSON を出力する。トークン、upload URL、Authorization ヘッダー、フレームのバイト列は絶対にログに出さない。
 - **サーバー instructions**（`src/mcp/instructions.ts`）: エージェントに段階的な調査パターンを促す文面。ツールの振る舞いを変えたときはここと README の Tool reference も合わせて更新する。

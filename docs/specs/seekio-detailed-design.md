@@ -104,6 +104,9 @@ Claude Code / Codex / MCP Client
 │ video_frames                 │
 │ video_frame                  │
 │ video_delete                 │
+│                              │
+│ scheduled (Cron, 毎時)       │
+│  └ 期限切れ動画の削除        │
 └──────────────┬───────────────┘
                │ Stream Binding
                ▼
@@ -350,6 +353,33 @@ env.STREAM.video(id).generateToken()
 env.STREAM.video(id).delete()
 ```
 
+### 10.1 Cloudflare Images binding（region 切り出し）
+
+`video_frame` の `region`（指定範囲の切り出し）のために、Cloudflare Images の
+Workers binding（`env.IMAGES`）を新しい依存として採用する。
+
+採用理由:
+
+``` text
+- 実利用で、全体フレーム（720p に縮小）では下端のクレジットなど小さい文字が読めず、
+  元の解像度から範囲を切り出す手段が必要と確認された
+- Stream のサムネイルは任意の矩形で切り出せない（time / height / width / fit のみ）
+- 解像度の上限を上げるだけでは不十分（モデル側で長辺約 1.5k px に縮められる）
+```
+
+§3 の非目標（R2 / ffmpeg / VLM / OCR など）とは矛盾しない。Seekio は画像を
+理解せず、切り出した JPEG を返すだけである。動画の保存は引き続き Stream が担う。
+
+``` json
+{ "images": { "binding": "IMAGES" } }
+```
+
+- 切り出しは `VideoBackend` とは別の境界 `ImageCropper`（`src/video/image.ts`）に置く
+- `env.IMAGES` が無い環境では cropper を作らず、`region` 指定は `REGION_UNAVAILABLE`
+- 変換失敗（無料枠 月 5,000 ユニーク変換の超過を含む）は `REGION_CROP_FAILED`。
+  超過時の挙動は未確認のため、エラー文字列に依存した分岐は作らない
+- 結果の長辺は `regionMaxLongEdge`（1568px）まで。超える場合だけ縮小し、拡大はしない
+
 ## 11. Upload 設計
 
 動画 bytes を Worker 経由にしない。
@@ -548,6 +578,7 @@ Input:
 {
   video_id: string;
   at: number;
+  region?: { x: number; y: number; width: number; height: number };
 }
 ```
 
@@ -555,12 +586,21 @@ validation:
 
 ``` text
 0 <= at < duration
+region: 各値 0..1、width/height > 0、x+width <= 1、y+height <= 1
+        （左上が原点。x=左端、y=上端。違反は INVALID_REGION）
 ```
 
 Response:
 
 ``` text
 Frame at 3.347s
+<image/jpeg>
+```
+
+`region` 指定時は、ソース解像度のフレームから矩形を切り出して返す（§10.1）。
+
+``` text
+Frame at 3.347s, region x=0 y=0.8 w=1 h=0.2 (1568x176 px)
 <image/jpeg>
 ```
 
@@ -712,12 +752,29 @@ Seekio は動画ライブラリではない。動画は temporary artifact。
 
 v1 は明示的な `video_delete` を提供する。
 
-Stream の scheduled deletion は短時間 TTL
-用として使わない。24時間等の自動 cleanup が必要になったら Cron Trigger
-を Phase 2 で追加する。
+Stream の `scheduledDeletion` はアップロードから30日以上先しか指定できない
+ため、短時間 TTL には使えない。自動削除は Worker の Cron Trigger で行う。
 
-その際も Stream metadata だけで安全に cleanup できるなら DB
-は追加しない。
+-   `wrangler.jsonc` の `triggers.crons`（`0 * * * *`、毎時）で `scheduled`
+    ハンドラーを起動する
+-   `VideoBackend.listVideos()` が Stream の `meta.application === "seekio"`
+    の動画だけを返す（同じアカウントの他の動画は絶対に消さない）。一覧は
+    `videos.list` の `before`（`lte`）でページングする
+-   `deleteExpiredVideos(backend, now, retentionHours)`（`src/video/cleanup.ts`）が、
+    `createdAt` が `now - retentionHours` より古い動画だけを `delete` する。
+    ちょうど境界の動画と `createdAt` を解釈できない動画は消さない。1件の失敗で
+    全体を止めない
+-   保持時間は `VIDEO_RETENTION_HOURS`（既定 24）。毎時実行なので、最大で約1時間
+    遅れて消える
+-   保険として、作成時に `scheduledDeletion`（作成から31日後）も付ける。
+    Cron が動かなくても Stream 側で消える
+-   ログは `cleanup.completed`（scanned / deleted / failed / duration_ms）のみ。
+    動画 ID や URL は出さない
+-   出力: `video_create_upload` / `video_import_url` は
+    `auto_delete_after_hours`、`video_info` は `delete_after` を返す
+
+DB / KV / Durable Objects は追加しない（Stream の metadata と作成時刻だけで
+判断できる）。
 
 ## 19. Observability
 
@@ -773,6 +830,7 @@ export const defaults = {
   overviewMaxFrames: 12,
   frameHeight: 720,
   frameFetchConcurrency: 6,
+  videoRetentionHours: 24, // Cron cleanup の保持時間（VIDEO_RETENTION_HOURS で上書き）
 } as const;
 ```
 

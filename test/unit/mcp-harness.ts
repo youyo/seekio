@@ -2,6 +2,7 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { defaults } from "../../src/config";
 import { createSeekioServer } from "../../src/mcp/server";
 import type { VideoBackend } from "../../src/video/backend";
+import type { ImageCropper } from "../../src/video/image";
 import { FakeVideoBackend } from "./fake-backend";
 
 export type Content =
@@ -13,8 +14,11 @@ export type ToolResult = { content: Content[]; isError?: boolean };
 /** Drives the real MCP server over the SDK's HTTP handler without a network or a client package. */
 export function createHarness<B extends VideoBackend = FakeVideoBackend>(
   backend: B = new FakeVideoBackend() as unknown as B,
+  options: { sleep?: (ms: number) => Promise<void>; cropper?: ImageCropper } = {},
 ) {
-  const handler = createMcpHandler(() => createSeekioServer({ backend, config: { ...defaults } }));
+  const handler = createMcpHandler(() =>
+    createSeekioServer({ backend, config: { ...defaults }, ...options }),
+  );
   let nextId = 1;
 
   async function rpc<T>(method: string, params: unknown): Promise<T> {

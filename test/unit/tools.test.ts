@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaults } from "../../src/config";
 import { SeekioError } from "../../src/mcp/errors";
 import { FAKE_JPEG, FakeVideoBackend } from "./fake-backend";
+import { cropFailed, FAKE_CROP_JPEG, FakeImageCropper } from "./fake-cropper";
 import { createHarness, jsonOf, textOf } from "./mcp-harness";
 
 const TOOL_NAMES = [
@@ -14,6 +15,7 @@ const TOOL_NAMES = [
   "video_delete",
 ];
 const FAKE_JPEG_BASE64 = Buffer.from(FAKE_JPEG).toString("base64");
+const FAKE_CROP_BASE64 = Buffer.from(FAKE_CROP_JPEG).toString("base64");
 
 let backend: FakeVideoBackend;
 let harness: ReturnType<typeof createHarness>;
@@ -39,14 +41,47 @@ describe("video_create_upload", () => {
     expect(jsonOf(result)).toEqual({
       video_id: "fake-1",
       upload_url: "https://upload.example/fake-1",
+      upload_command:
+        "curl -sS --fail-with-body -X POST -F 'file=@\"<PATH>\"' 'https://upload.example/fake-1'",
       expires_at: "2026-01-01T00:15:00.000Z",
       max_duration_seconds: defaults.maxVideoDurationSeconds,
       max_upload_bytes: defaults.maxUploadBytes,
+      auto_delete_after_hours: 24,
     });
     expect(backend.calls[0]).toEqual({
       op: "createUpload",
       input: { filename: "drawer.mp4", maxDurationSeconds: 300 },
     });
+  });
+
+  it("quotes the upload_url safely inside upload_command", async () => {
+    backend.uploadUrlOverride = "https://upload.example/a'b";
+    const result = await harness.callTool("video_create_upload", {});
+    const { upload_command, upload_url } = jsonOf<{ upload_command: string; upload_url: string }>(
+      result,
+    );
+    expect(upload_url).toBe("https://upload.example/a'b");
+    expect(upload_command).toContain("'https://upload.example/a'\\''b'");
+  });
+
+  it("never logs upload_url or upload_command", async () => {
+    const logSpy = vi.spyOn(console, "log");
+    await harness.callTool("video_create_upload", {});
+    const logged = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("upload.created");
+    expect(logged).not.toContain("upload.example");
+    expect(logged).not.toContain("curl");
+  });
+
+  it("describes upload_command and wait_seconds in the description", async () => {
+    const { tools } = await harness.listTools();
+    const desc = tools.find((t) => t.name === "video_create_upload")?.description ?? "";
+    expect(desc).toContain("upload_command");
+    expect(desc).toContain("<PATH>");
+    expect(desc).toContain("curl 7.76");
+    expect(desc).toContain("backslash");
+    expect(desc).toContain("wait_seconds");
+    expect(desc).not.toContain("poll video_info");
   });
 
   it("rejects max_duration_seconds above the server limit", async () => {
@@ -56,6 +91,27 @@ describe("video_create_upload", () => {
   });
 });
 
+describe("video_import_url description", () => {
+  it("uses wait_seconds instead of polling", async () => {
+    const { tools } = await harness.listTools();
+    const desc = tools.find((t) => t.name === "video_import_url")?.description ?? "";
+    expect(desc).toContain("wait_seconds");
+    expect(desc).not.toContain("poll video_info");
+  });
+});
+
+describe("auto deletion notices", () => {
+  it.each(["video_create_upload", "video_import_url", "video_info"])(
+    "%s description states the automatic deletion window",
+    async (name) => {
+      const { tools } = await harness.listTools();
+      const desc = tools.find((t) => t.name === name)?.description ?? "";
+      expect(desc).toContain("24 hours");
+      expect(desc).toContain("video_delete");
+    },
+  );
+});
+
 describe("video_import_url", () => {
   it("imports a URL and returns video_id and status", async () => {
     const result = await harness.callTool("video_import_url", {
@@ -63,7 +119,11 @@ describe("video_import_url", () => {
       filename: "foo.mp4",
     });
     expect(result.isError).toBeUndefined();
-    expect(jsonOf(result)).toEqual({ video_id: "fake-1", status: "downloading" });
+    expect(jsonOf(result)).toEqual({
+      video_id: "fake-1",
+      status: "downloading",
+      auto_delete_after_hours: 24,
+    });
     expect(backend.calls[0]).toEqual({
       op: "importFromUrl",
       input: { url: "https://example.com/foo.mp4", filename: "foo.mp4" },
@@ -123,6 +183,22 @@ describe("video_info", () => {
     });
   });
 
+  it("adds delete_after (createdAt + retention) and omits it without a usable createdAt", async () => {
+    backend.addVideo({ id: "dated", createdAt: "2026-01-01T00:00:00Z" });
+    backend.addVideo({ id: "undated" });
+    backend.addVideo({ id: "garbled", createdAt: "yesterday-ish" });
+    const dated = jsonOf<Record<string, unknown>>(
+      await harness.callTool("video_info", { video_id: "dated" }),
+    );
+    expect(dated.delete_after).toBe("2026-01-02T00:00:00.000Z");
+    for (const id of ["undated", "garbled"]) {
+      const other = jsonOf<Record<string, unknown>>(
+        await harness.callTool("video_info", { video_id: id }),
+      );
+      expect("delete_after" in other).toBe(false);
+    }
+  });
+
   it("reports processing videos as not ready and unknown ids as errors", async () => {
     backend.addVideo({ id: "v2", status: "inprogress" });
     const processing = await harness.callTool("video_info", { video_id: "v2" });
@@ -133,6 +209,106 @@ describe("video_info", () => {
     const missing = await harness.callTool("video_info", { video_id: "nope" });
     expect(missing.isError).toBe(true);
     expect(textOf(missing)).toMatch(/^\[VIDEO_NOT_FOUND\]/);
+  });
+});
+
+describe("video_info wait_seconds", () => {
+  const inprogress = { id: "w", status: "inprogress", pctComplete: 40 } as const;
+  const ready = { id: "w", status: "ready", duration: 5, width: 100, height: 200 } as const;
+
+  function waitingHarness() {
+    const sleeps: number[] = [];
+    const fake = new FakeVideoBackend();
+    const h = createHarness(fake, {
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+    });
+    return { fake, h, sleeps };
+  }
+
+  const infoCalls = (fake: FakeVideoBackend) => fake.calls.filter((c) => c.op === "getInfo").length;
+
+  it("returns early once the video becomes ready", async () => {
+    const { fake, h, sleeps } = waitingHarness();
+    fake.setInfoSequence("w", [inprogress, inprogress, ready]);
+    const result = await h.callTool("video_info", { video_id: "w", wait_seconds: 25 });
+    expect(jsonOf(result)).toMatchObject({ status: "ready", ready: true });
+    expect(infoCalls(fake)).toBe(3);
+    expect(sleeps).toEqual([2000, 2000]);
+  });
+
+  it("returns early when the video errors", async () => {
+    const { fake, h } = waitingHarness();
+    fake.setInfoSequence("w", [inprogress, { id: "w", status: "error" }]);
+    const result = await h.callTool("video_info", { video_id: "w", wait_seconds: 25 });
+    expect(result.isError).toBeFalsy();
+    expect(jsonOf(result)).toMatchObject({ status: "error", ready: false });
+    expect(infoCalls(fake)).toBe(2);
+  });
+
+  it("returns the last state when the wait expires", async () => {
+    const { fake, h, sleeps } = waitingHarness();
+    fake.setInfoSequence("w", [inprogress]);
+    const result = await h.callTool("video_info", { video_id: "w", wait_seconds: 5 });
+    expect(result.isError).toBeFalsy();
+    expect(jsonOf(result)).toMatchObject({ status: "inprogress", ready: false });
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(5000);
+    expect(infoCalls(fake)).toBe(sleeps.length + 1);
+  });
+
+  it("calls getInfo once when wait_seconds is omitted or 0", async () => {
+    const { fake, h, sleeps } = waitingHarness();
+    fake.setInfoSequence("w", [inprogress, ready]);
+    await h.callTool("video_info", { video_id: "w" });
+    await h.callTool("video_info", { video_id: "w", wait_seconds: 0 });
+    expect(infoCalls(fake)).toBe(2);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("keeps waiting when ready but duration is unknown, then reports ready: false", async () => {
+    const { fake, h, sleeps } = waitingHarness();
+    fake.setInfoSequence("w", [{ id: "w", status: "ready" }]);
+    const result = await h.callTool("video_info", { video_id: "w", wait_seconds: 5 });
+    expect(jsonOf(result)).toMatchObject({ status: "ready", ready: false });
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(5000);
+  });
+
+  it("wait_seconds=25 that expires sleeps 2000ms x12 then 1000ms", async () => {
+    const { fake, h, sleeps } = waitingHarness();
+    fake.setInfoSequence("w", [inprogress]);
+    await h.callTool("video_info", { video_id: "w", wait_seconds: 25 });
+    expect(sleeps).toEqual([...Array(12).fill(2000), 1000]);
+  });
+
+  it("documents the schema maximum in description and input schema", async () => {
+    const { tools } = await harness.listTools();
+    const desc = tools.find((t) => t.name === "video_info")?.description ?? "";
+    expect(desc).toContain(`up to ${defaults.infoMaxWaitSeconds}`);
+    const { instructions } = await import("../../src/mcp/instructions");
+    expect(instructions).toContain(`${defaults.infoMaxWaitSeconds}`);
+  });
+
+  it("rejects out-of-range or non-integer wait_seconds", async () => {
+    const { fake, h } = waitingHarness();
+    fake.addVideo({ id: "w" });
+    for (const wait_seconds of [-1, 26, 1.5]) {
+      const result = await h.callTool("video_info", { video_id: "w", wait_seconds });
+      expect(result.isError).toBe(true);
+    }
+    expect(infoCalls(fake)).toBe(0);
+  });
+
+  it("outputs pct_complete while encoding and omits it when unknown", async () => {
+    const { fake, h } = waitingHarness();
+    fake.setInfoSequence("w", [inprogress]);
+    const encoding = jsonOf<Record<string, unknown>>(
+      await h.callTool("video_info", { video_id: "w" }),
+    );
+    expect(encoding.pct_complete).toBe(40);
+    fake.addVideo({ id: "r" });
+    const done = jsonOf<Record<string, unknown>>(await h.callTool("video_info", { video_id: "r" }));
+    expect("pct_complete" in done).toBe(false);
   });
 });
 
@@ -284,6 +460,138 @@ describe("video_frame", () => {
     const result = await harness.callTool("video_frame", { video_id: "v", at: 10 });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/^\[INVALID_TIMESTAMP\]/);
+  });
+});
+
+describe("video_frame region", () => {
+  const credits = { x: 0, y: 0.8, width: 1, height: 0.2 };
+  let cropper: FakeImageCropper;
+  let regionHarness: ReturnType<typeof createHarness>;
+
+  beforeEach(() => {
+    cropper = new FakeImageCropper();
+    regionHarness = createHarness(backend, { cropper });
+    backend.addVideo({ id: "v", duration: 10 });
+  });
+
+  it("fetches the source-resolution frame, crops it and reports the region and size", async () => {
+    const result = await regionHarness.callTool("video_frame", {
+      video_id: "v",
+      at: 3.3474,
+      region: credits,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: "Frame at 3.347s, region x=0 y=0.8 w=1 h=0.2 (1568x176 px)",
+      },
+      { type: "image", data: FAKE_CROP_BASE64, mimeType: "image/jpeg" },
+    ]);
+    expect(backend.calls.filter((c) => c.op === "getFrame")).toEqual([
+      { op: "getFrame", videoId: "v", timestamp: 3.347, fullResolution: true },
+    ]);
+    expect(cropper.calls).toHaveLength(1);
+    expect(cropper.calls[0]?.region).toEqual(credits);
+    expect(cropper.calls[0]?.maxLongEdge).toBe(defaults.regionMaxLongEdge);
+    expect(defaults.regionMaxLongEdge).toBe(1568);
+  });
+
+  it("labels the crop with the timestamp the backend actually returned", async () => {
+    const original = backend.getFrame.bind(backend);
+    backend.getFrame = async (id, ts, options) => ({
+      ...(await original(id, ts, options)),
+      timestamp: 9.5,
+    });
+    const result = await regionHarness.callTool("video_frame", {
+      video_id: "v",
+      at: 9.9,
+      region: credits,
+    });
+    expect(textOf(result)).toMatch(/^Frame at 9\.5s, region /);
+  });
+
+  it("rejects invalid regions with INVALID_REGION before fetching any frame", async () => {
+    const result = await regionHarness.callTool("video_frame", {
+      video_id: "v",
+      at: 1,
+      region: { x: 0.6, y: 0, width: 0.5, height: 0.5 },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^\[INVALID_REGION\]/);
+    expect(backend.calls.some((c) => c.op === "getFrame")).toBe(false);
+    expect(cropper.calls).toHaveLength(0);
+  });
+
+  it("returns REGION_UNAVAILABLE telling the agent to drop region when there is no cropper", async () => {
+    const result = await createHarness(backend).callTool("video_frame", {
+      video_id: "v",
+      at: 1,
+      region: credits,
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^\[REGION_UNAVAILABLE\].*region/);
+    expect(backend.calls.some((c) => c.op === "getFrame")).toBe(false);
+  });
+
+  it("surfaces cropper failures as REGION_CROP_FAILED and logs backend.error", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    cropper.error = cropFailed();
+    const result = await regionHarness.callTool("video_frame", {
+      video_id: "v",
+      at: 1,
+      region: credits,
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^\[REGION_CROP_FAILED\]/);
+    expect(log.mock.calls.map((c) => String(c[0])).join("\n")).toContain("REGION_CROP_FAILED");
+  });
+
+  it("wraps unknown cropper exceptions as REGION_CROP_FAILED", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    cropper.error = new Error("boom");
+    const result = await regionHarness.callTool("video_frame", {
+      video_id: "v",
+      at: 1,
+      region: credits,
+    });
+    expect(textOf(result)).toMatch(/^\[REGION_CROP_FAILED\]/);
+    expect(textOf(result)).not.toContain("boom");
+  });
+
+  it("logs frame.requested with region and output size but no bytes", async () => {
+    const log = vi.spyOn(console, "log");
+    log.mockClear();
+    await regionHarness.callTool("video_frame", { video_id: "v", at: 1, region: credits });
+    const line = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes("frame.requested"));
+    const parsed = JSON.parse(line as string) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ region: true, out_width: 1568, out_height: 176 });
+    expect(line).not.toContain(FAKE_CROP_BASE64);
+  });
+
+  it("mentions region in the server instructions for reading fine text", async () => {
+    const { instructions } = await import("../../src/mcp/instructions");
+    expect(instructions.match(/region/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it("documents region in the tool description", async () => {
+    const { tools } = await regionHarness.listTools();
+    const description = tools.find((t) => t.name === "video_frame")?.description ?? "";
+    expect(description).toContain("region");
+    expect(description).toContain("top-left");
+    expect(description).toContain("y: 0.8");
+  });
+
+  it("without region behaves exactly as before (no full resolution, no crop)", async () => {
+    const result = await regionHarness.callTool("video_frame", { video_id: "v", at: 3.3474 });
+    expect(result.content).toEqual([
+      { type: "text", text: "Frame at 3.347s" },
+      { type: "image", data: FAKE_JPEG_BASE64, mimeType: "image/jpeg" },
+    ]);
+    expect(backend.calls.filter((c) => c.op === "getFrame")).toEqual([
+      { op: "getFrame", videoId: "v", timestamp: 3.347 },
+    ]);
+    expect(cropper.calls).toHaveLength(0);
   });
 });
 

@@ -16,4 +16,16 @@ describe("resolveConfig", () => {
     expect(resolveConfig({ MAX_VIDEO_DURATION_SECONDS: "0" }).maxVideoDurationSeconds).toBe(300);
     expect(resolveConfig({ MAX_VIDEO_DURATION_SECONDS: "1.5" }).maxVideoDurationSeconds).toBe(300);
   });
+
+  it("defaults videoRetentionHours to 24 and overrides it from VIDEO_RETENTION_HOURS", () => {
+    expect(resolveConfig({}).videoRetentionHours).toBe(24);
+    expect(resolveConfig({ VIDEO_RETENTION_HOURS: "6" }).videoRetentionHours).toBe(6);
+  });
+
+  it.each(["0", "-1", "1.5", "abc", ""])(
+    "falls back to the default retention for invalid VIDEO_RETENTION_HOURS %j",
+    (raw) => {
+      expect(resolveConfig({ VIDEO_RETENTION_HOURS: raw }).videoRetentionHours).toBe(24);
+    },
+  );
 });

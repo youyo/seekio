@@ -236,6 +236,23 @@ describe("CloudflareStreamBackend", () => {
     expect(info).toEqual({ id: "abc", status: "inprogress", createdAt: "2026-01-01T00:00:00Z" });
   });
 
+  it("converts Stream's string pctComplete to a number and ignores invalid values", async () => {
+    const withPct = (pctComplete?: string) =>
+      fakeStream({
+        details: async () =>
+          video({
+            readyToStream: false,
+            status: { state: "inprogress", errorReasonCode: "", errorReasonText: "", pctComplete },
+          } as unknown as Partial<StreamVideo>),
+      }).stream;
+    const info = await new CloudflareStreamBackend(withPct("42.5"), options).getInfo("abc");
+    expect(info.pctComplete).toBe(42.5);
+    for (const bad of [undefined, "", "abc", "150", "-3"]) {
+      const other = await new CloudflareStreamBackend(withPct(bad), options).getInfo("abc");
+      expect("pctComplete" in other).toBe(false);
+    }
+  });
+
   it("maps NotFoundError to VIDEO_NOT_FOUND and other errors to BACKEND_ERROR", async () => {
     const missing = fakeStream({ details: async () => Promise.reject(notFound()) });
     await expect(
@@ -270,6 +287,49 @@ describe("CloudflareStreamBackend", () => {
     expect(url).toBe(
       "https://customer-abc123.cloudflarestream.com/TOKEN/thumbnails/thumbnail.jpg?time=3.347s&height=720&fit=scale",
     );
+  });
+
+  it("fullResolution requests the source height (uncapped), or frameHeight when unknown", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (input: URL) => {
+      urls.push(String(input));
+      return new Response(new Uint8Array([0xff]), { status: 200 });
+    });
+    const run = async (input: StreamVideo["input"] | undefined, full: boolean) => {
+      const { stream } = fakeStream({
+        details: async () => video({ input } as Partial<StreamVideo>),
+        generateToken: async () => "TOKEN",
+      });
+      await new CloudflareStreamBackend(stream, options).getFrame(
+        "abc",
+        1,
+        full ? { fullResolution: true } : undefined,
+      );
+      return new URL(urls.at(-1) as string).searchParams.get("height");
+    };
+    expect(await run({ width: 3840, height: 2160 }, true)).toBe("2160");
+    expect(await run({ width: 3840, height: 2160 }, false)).toBe("720");
+    expect(await run({ width: -1, height: -1 }, true)).toBe("720");
+  });
+
+  it("fullResolution keeps the end-of-video retry", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (input: URL) => {
+      urls.push(String(input));
+      return urls.length === 1
+        ? new Response("no", { status: 404 })
+        : new Response(new Uint8Array([0xff]), { status: 200 });
+    });
+    const { stream } = fakeStream({
+      details: async () => video({ duration: 10, input: { width: 1920, height: 1080 } }),
+      generateToken: async () => "TOKEN",
+    } as Handle);
+    const frame = await new CloudflareStreamBackend(stream, options).getFrame("abc", 9.9, {
+      fullResolution: true,
+    });
+    expect(frame.timestamp).toBeLessThan(9.9);
+    expect(urls).toHaveLength(2);
+    expect(new URL(urls[1] as string).searchParams.get("height")).toBe("1080");
   });
 
   it("never upscales: uses min(source height, frameHeight)", async () => {
@@ -478,5 +538,153 @@ describe("RPC stub disposal", () => {
     expect(upload.videoId).toBe("vid");
     expect(upload.uploadUrl).toBe("https://u.example/vid");
     expect(result.dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("CloudflareStreamBackend scheduledDeletion safety net", () => {
+  const NOW = Date.parse("2026-06-10T12:00:00.000Z");
+  const expected = new Date(NOW + 31 * 24 * 3_600_000).toISOString();
+  const fixedClock = { ...options, now: () => NOW };
+
+  it("passes scheduledDeletion 31 days out to createDirectUpload", async () => {
+    const createDirectUpload = vi.fn(async (_params: StreamDirectUploadCreateParams) => ({
+      id: "vid",
+      uploadURL: "https://upload.cloudflarestream.com/vid",
+      watermark: null,
+      scheduledDeletion: null,
+    }));
+    const { stream } = fakeStream({}, createDirectUpload);
+    await new CloudflareStreamBackend(stream, fixedClock).createUpload({});
+    const params = createDirectUpload.mock.calls[0]?.[0] as StreamDirectUploadCreateParams;
+    expect(params.scheduledDeletion).toBe(expected);
+  });
+
+  it("passes scheduledDeletion 31 days out to stream.upload", async () => {
+    const upload = vi.fn(async (_url: string, _params?: StreamUrlUploadParams) => video());
+    const { stream } = fakeStream({}, undefined, upload);
+    await new CloudflareStreamBackend(stream, fixedClock).importFromUrl({
+      url: "https://example.com/foo.mp4",
+    });
+    const params = upload.mock.calls[0]?.[1] as StreamUrlUploadParams;
+    expect(params.scheduledDeletion).toBe(expected);
+  });
+});
+
+describe("CloudflareStreamBackend.listVideos", () => {
+  function listed(id: string, created: string, meta: Record<string, string> | undefined) {
+    return video({ id, created, ...(meta && { meta }) } as Partial<StreamVideo>);
+  }
+
+  /** A `videos.list` that honours limit/before/beforeComp, newest first, like Stream. */
+  function listingStream(all: StreamVideo[]) {
+    const params: StreamVideosListParams[] = [];
+    const sorted = [...all].sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
+    const list = vi.fn(async (p: StreamVideosListParams = {}) => {
+      params.push(p);
+      const before = p.before === undefined ? Number.POSITIVE_INFINITY : Date.parse(p.before);
+      const inclusive = p.beforeComp === "lte";
+      return sorted
+        .filter((v) => {
+          const t = Date.parse(v.created);
+          return inclusive ? t <= before : t < before;
+        })
+        .slice(0, p.limit ?? 1000);
+    });
+    const stream = { videos: { list } } as unknown as StreamBinding;
+    return { stream, params, list };
+  }
+
+  it("returns only videos whose meta.application is seekio", async () => {
+    const { stream } = listingStream([
+      listed("mine", "2026-01-03T00:00:00Z", { application: "seekio", filename: "a.mp4" }),
+      listed("other-app", "2026-01-02T00:00:00Z", { application: "someone-else" }),
+      listed("no-meta", "2026-01-01T00:00:00Z", undefined),
+      listed("empty-meta", "2025-12-31T00:00:00Z", {}),
+      listed("case", "2025-12-30T00:00:00Z", { application: "Seekio" }),
+    ]);
+    const result = await new CloudflareStreamBackend(stream, options).listVideos();
+    expect(result).toEqual([{ videoId: "mine", createdAt: "2026-01-03T00:00:00Z" }]);
+  });
+
+  it("treats a missing meta property as not seekio", async () => {
+    const noMeta = video({ id: "x" });
+    (noMeta as unknown as { meta?: unknown }).meta = undefined;
+    const { stream } = listingStream([noMeta]);
+    expect(await new CloudflareStreamBackend(stream, options).listVideos()).toEqual([]);
+  });
+
+  it("pages through every video until a short page is returned", async () => {
+    const all: StreamVideo[] = [];
+    for (let i = 0; i < 250; i++) {
+      const created = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
+      all.push(
+        listed(
+          `v${i}`,
+          created,
+          i % 5 === 0 ? { application: "other" } : { application: "seekio" },
+        ),
+      );
+    }
+    const { stream, list } = listingStream(all);
+    const result = await new CloudflareStreamBackend(stream, options).listVideos();
+    expect(list.mock.calls.length).toBeGreaterThan(1);
+    expect(result).toHaveLength(200);
+    expect(new Set(result.map((v) => v.videoId)).size).toBe(200);
+    expect(result.some((v) => Number(v.videoId.slice(1)) % 5 === 0)).toBe(false);
+  });
+
+  it("does not skip videos that share the boundary timestamp between pages", async () => {
+    const tie = "2026-01-01T00:00:00Z";
+    const all = [
+      ...Array.from({ length: 60 }, (_, i) =>
+        listed(`n${i}`, "2026-01-02T00:00:00Z", { application: "seekio" }),
+      ),
+      // Page 1 (limit 100) ends 40 videos into this tie group of 60.
+      ...Array.from({ length: 60 }, (_, i) => listed(`s${i}`, tie, { application: "seekio" })),
+      listed("older", "2025-12-31T00:00:00Z", { application: "seekio" }),
+    ];
+    const { stream } = listingStream(all);
+    const result = await new CloudflareStreamBackend(stream, options).listVideos();
+    expect(result).toHaveLength(121);
+    expect(new Set(result.map((v) => v.videoId)).size).toBe(121);
+  });
+
+  it("stops instead of looping forever when a page makes no progress", async () => {
+    const stuck = Array.from({ length: 100 }, (_, i) =>
+      listed(`t${i}`, "2026-01-01T00:00:00Z", { application: "seekio" }),
+    );
+    const list = vi.fn(async () => stuck);
+    const stream = { videos: { list } } as unknown as StreamBinding;
+    const result = await new CloudflareStreamBackend(stream, options).listVideos();
+    expect(result).toHaveLength(100);
+    expect(list.mock.calls.length).toBeLessThanOrEqual(3);
+  });
+
+  it("maps list failures to BACKEND_ERROR", async () => {
+    const stream = {
+      videos: {
+        list: async () => {
+          throw new Error("boom");
+        },
+      },
+    } as unknown as StreamBinding;
+    await expect(new CloudflareStreamBackend(stream, options).listVideos()).rejects.toMatchObject({
+      code: "BACKEND_ERROR",
+    });
+  });
+
+  it("disposes the list result and every video in it", async () => {
+    const dispose = vi.fn();
+    const key = (Symbol as { dispose?: symbol }).dispose ?? Symbol.for("Symbol.dispose");
+    const item = Object.assign(listed("d", "2026-01-01T00:00:00Z", { application: "seekio" }), {
+      [key]: dispose,
+    });
+    const page = Object.assign([item], { [key]: dispose });
+    const stream = { videos: { list: async () => page } } as unknown as StreamBinding;
+    if (!(Symbol as { dispose?: symbol }).dispose) {
+      (Symbol as { dispose?: symbol }).dispose = key;
+    }
+    await new CloudflareStreamBackend(stream, options).listVideos();
+    expect(dispose).toHaveBeenCalledTimes(2);
   });
 });
