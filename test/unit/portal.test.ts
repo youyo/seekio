@@ -151,4 +151,62 @@ describe("portal script", () => {
     expect(put?.body).toMatchObject({ auth_type: "bearer", auth_credentials: "n3w-s3cret" });
     expect(vi.mocked(console.log).mock.calls.flat().join("\n")).not.toContain("n3w-s3cret");
   });
+
+  it("registers with oauth, prints auth_type in dry-run, and sends no credentials", async () => {
+    const oauthEnv = { ...env, SEEKIO_PORTAL_AUTH: "oauth", SEEKIO_AUTH_TOKEN: "tok-x" };
+    stubApi(({ method, path }) => {
+      if (method !== "GET") throw new Error(`unexpected write ${method} ${path}`);
+      if (path === SERVER_PATH) return notFound();
+      return respond(alignedPortal());
+    });
+    expect(await main(["--dry-run"], oauthEnv)).toBe(0);
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain('"auth_type":"oauth"');
+
+    calls = [];
+    stubApi(({ method, path }) => {
+      if (method === "GET" && path === SERVER_PATH) return notFound();
+      if (method === "POST" && path === "/access/ai-controls/mcp/servers")
+        return respond(existing({ auth_type: "oauth" }));
+      if (method === "POST" && path === `${SERVER_PATH}/sync`)
+        return respond(existing({ auth_type: "oauth", status: "ready", tools: allTools() }));
+      if (method === "GET" && path === PORTAL_PATH) return respond(alignedPortal());
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    expect(await main([], oauthEnv)).toBe(0);
+    const post = calls.find((c) => c.method === "POST" && c.path.endsWith("/servers"));
+    expect(post?.body).toEqual({
+      id: "seekio",
+      name: "Seekio",
+      hostname: env.SEEKIO_MCP_URL,
+      auth_type: "oauth",
+    });
+  });
+
+  it("updates a bearer-registered server to oauth once and is then a no-op", async () => {
+    const oauthEnv = { ...env, SEEKIO_PORTAL_AUTH: "oauth" };
+    stubApi(({ method, path }) => {
+      if (method === "GET" && path === SERVER_PATH)
+        return respond(existing({ auth_type: "bearer" }));
+      if (method === "PUT" && path === SERVER_PATH)
+        return respond(existing({ auth_type: "oauth" }));
+      if (method === "POST" && path === `${SERVER_PATH}/sync`)
+        return respond(existing({ auth_type: "oauth", status: "ready", tools: allTools() }));
+      if (method === "GET" && path === PORTAL_PATH) return respond(alignedPortal());
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    expect(await main([], oauthEnv)).toBe(0);
+    expect(calls.find((c) => c.method === "PUT")?.body).toMatchObject({ auth_type: "oauth" });
+
+    calls = [];
+    stubApi(({ method, path }) => {
+      if (method === "GET" && path === SERVER_PATH)
+        return respond(existing({ auth_type: "oauth" }));
+      if (method === "POST" && path === `${SERVER_PATH}/sync`)
+        return respond(existing({ auth_type: "oauth", status: "ready", tools: allTools() }));
+      if (method === "GET" && path === PORTAL_PATH) return respond(alignedPortal());
+      throw new Error(`unexpected ${method} ${path}`);
+    });
+    expect(await main([], oauthEnv)).toBe(0);
+    expect(calls.map((c) => c.method)).toEqual(["GET", "POST", "GET"]);
+  });
 });

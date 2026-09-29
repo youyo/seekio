@@ -311,12 +311,15 @@ export SEEKIO_MCP_URL=https://seekio.example.workers.dev/mcp
 export SEEKIO_PORTAL_ID=...
 export SEEKIO_PORTAL_SERVER_ID=seekio    # optional, default "seekio"
 export SEEKIO_AUTH_TOKEN=...             # optional: registers the server with bearer auth
+export SEEKIO_PORTAL_AUTH=oauth          # optional: oauth | bearer | unauthenticated
 
 mise run portal:dry-run   # show changes only
 mise run portal           # apply
 ```
 
 The script creates the MCP server entry if missing, updates it when the URL or auth type drifts, syncs its tool list, and ensures the portal mapping exposes all seven tools without aliases. Running it twice is a no-op. Worker deploys (`mise run deploy`) never touch the portal.
+
+`SEEKIO_PORTAL_AUTH` selects the server's `auth_type`. When unset, it is `bearer` if `SEEKIO_AUTH_TOKEN` is set and `unauthenticated` otherwise. `bearer` requires `SEEKIO_AUTH_TOKEN`; `oauth` never sends a token. Use `oauth` when the Worker is protected by Cloudflare Access with Managed OAuth.
 
 ## Security
 

@@ -847,7 +847,12 @@ CLOUDFLARE_API_TOKEN
 SEEKIO_MCP_URL
 SEEKIO_PORTAL_ID
 SEEKIO_PORTAL_SERVER_ID=seekio
+SEEKIO_PORTAL_AUTH (optional: oauth | bearer | unauthenticated)
 ```
+
+`SEEKIO_PORTAL_AUTH` 未指定時は `SEEKIO_AUTH_TOKEN` があれば bearer、なければ
+unauthenticated。`bearer` は `SEEKIO_AUTH_TOKEN` 必須、`oauth` はトークンを送らない。
+Cloudflare Access（Managed OAuth）で保護した Worker は `oauth` で登録する。
 
 `scripts/portal.ts` の責務:
 

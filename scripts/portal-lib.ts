@@ -13,6 +13,9 @@ export const SEEKIO_TOOLS = [
   "video_delete",
 ] as const;
 
+export type PortalAuth = "oauth" | "bearer" | "unauthenticated";
+const PORTAL_AUTH_VALUES: readonly PortalAuth[] = ["oauth", "bearer", "unauthenticated"];
+
 export type PortalEnv = {
   accountId: string;
   apiToken: string;
@@ -20,6 +23,8 @@ export type PortalEnv = {
   portalId: string;
   serverId: string;
   authToken?: string;
+  /** Explicit SEEKIO_PORTAL_AUTH. When unset, bearer if authToken is set, else unauthenticated. */
+  portalAuth?: PortalAuth;
 };
 
 export type EnvError = { missing: string[]; invalid: string[] };
@@ -45,6 +50,12 @@ export function parseEnv(raw: NodeJS.ProcessEnv): { env: PortalEnv } | { error: 
   if (raw.SEEKIO_MCP_URL && !isValidMcpUrl(raw.SEEKIO_MCP_URL)) {
     invalid.push("SEEKIO_MCP_URL must be an https URL ending in /mcp");
   }
+  const portalAuth = raw.SEEKIO_PORTAL_AUTH;
+  if (portalAuth && !PORTAL_AUTH_VALUES.includes(portalAuth as PortalAuth)) {
+    invalid.push(`SEEKIO_PORTAL_AUTH must be one of: ${PORTAL_AUTH_VALUES.join(", ")}`);
+  } else if (portalAuth === "bearer" && !raw.SEEKIO_AUTH_TOKEN) {
+    invalid.push("SEEKIO_PORTAL_AUTH=bearer requires SEEKIO_AUTH_TOKEN to be set");
+  }
   if (missing.length > 0 || invalid.length > 0) return { error: { missing, invalid } };
   return {
     env: {
@@ -54,6 +65,7 @@ export function parseEnv(raw: NodeJS.ProcessEnv): { env: PortalEnv } | { error: 
       portalId: raw.SEEKIO_PORTAL_ID as string,
       serverId,
       ...(raw.SEEKIO_AUTH_TOKEN && { authToken: raw.SEEKIO_AUTH_TOKEN }),
+      ...(portalAuth && { portalAuth: portalAuth as PortalAuth }),
     },
   };
 }
@@ -82,17 +94,19 @@ export type ServerBody = {
   id: string;
   name: string;
   hostname: string;
-  auth_type: "bearer" | "unauthenticated";
+  auth_type: PortalAuth;
   auth_credentials?: string;
 };
 
 export function desiredServer(env: PortalEnv): ServerBody {
+  const authType: PortalAuth = env.portalAuth ?? (env.authToken ? "bearer" : "unauthenticated");
+  const sendToken = authType === "bearer" && env.authToken;
   return {
     id: env.serverId,
     name: "Seekio",
     hostname: env.mcpUrl,
-    auth_type: env.authToken ? "bearer" : "unauthenticated",
-    ...(env.authToken && { auth_credentials: env.authToken }),
+    auth_type: authType,
+    ...(sendToken && { auth_credentials: env.authToken }),
   };
 }
 

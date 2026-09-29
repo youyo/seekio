@@ -4,6 +4,7 @@ import {
   isValidMcpUrl,
   mergePortalServers,
   missingTools,
+  needsServerUpdate,
   type Portal,
   parseEnv,
   portalUpdateBody,
@@ -52,6 +53,15 @@ describe("parseEnv", () => {
     expect("error" in bad && bad.error.invalid).toHaveLength(2);
   });
 
+  it("validates SEEKIO_PORTAL_AUTH", () => {
+    const bad = parseEnv({ ...rawEnv, SEEKIO_PORTAL_AUTH: "basic" });
+    expect("error" in bad && bad.error.invalid.join("\n")).toContain("SEEKIO_PORTAL_AUTH");
+    const noToken = parseEnv({ ...rawEnv, SEEKIO_PORTAL_AUTH: "bearer" });
+    expect("error" in noToken && noToken.error.invalid.join("\n")).toContain("SEEKIO_AUTH_TOKEN");
+    const ok = parseEnv({ ...rawEnv, SEEKIO_PORTAL_AUTH: "oauth" });
+    expect("env" in ok && ok.env.portalAuth).toBe("oauth");
+  });
+
   it("accepts only https URLs ending in /mcp", () => {
     expect(isValidMcpUrl("https://a.b/mcp")).toBe(true);
     expect(isValidMcpUrl("https://a.b/mcp/")).toBe(false);
@@ -74,6 +84,39 @@ describe("desiredServer / serverDiff", () => {
     const open = parseEnv(rawEnv);
     if ("error" in open) throw new Error("unexpected");
     expect(desiredServer(open.env).auth_type).toBe("unauthenticated");
+  });
+
+  it("honours SEEKIO_PORTAL_AUTH and never sends a token for oauth", () => {
+    const parsed = parseEnv({
+      ...rawEnv,
+      SEEKIO_PORTAL_AUTH: "oauth",
+      SEEKIO_AUTH_TOKEN: "s3cret",
+    });
+    if ("error" in parsed) throw new Error("unexpected");
+    expect(desiredServer(parsed.env)).toEqual({
+      id: "seekio",
+      name: "Seekio",
+      hostname: rawEnv.SEEKIO_MCP_URL,
+      auth_type: "oauth",
+    });
+    const open = parseEnv({
+      ...rawEnv,
+      SEEKIO_PORTAL_AUTH: "unauthenticated",
+      SEEKIO_AUTH_TOKEN: "x",
+    });
+    if ("error" in open) throw new Error("unexpected");
+    expect(desiredServer(open.env)).not.toHaveProperty("auth_credentials");
+    expect(desiredServer(open.env).auth_type).toBe("unauthenticated");
+  });
+
+  it("detects auth_type drift toward oauth without forcing updates once aligned", () => {
+    const parsed = parseEnv({ ...rawEnv, SEEKIO_PORTAL_AUTH: "oauth" });
+    if ("error" in parsed) throw new Error("unexpected");
+    const desired = desiredServer(parsed.env);
+    const stale = { ...desired, auth_type: "bearer" as const };
+    expect(serverDiff(stale, desired)).toEqual({ auth_type: { from: "bearer", to: "oauth" } });
+    expect(needsServerUpdate(stale, desired)).toBe(true);
+    expect(needsServerUpdate(desired, desired)).toBe(false);
   });
 
   it("reports only the fields that changed", () => {
