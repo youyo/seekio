@@ -90,6 +90,45 @@ function retryTimestamps(timestamp: number): number[] {
   return [...new Set(candidates)].filter((t) => t < timestamp);
 }
 
+/**
+ * Releases an RPC stub (or a result that contains stubs) held through a Workers binding.
+ * Calls `Symbol.dispose` only when it exists, so in-process bindings and plain objects are fine.
+ */
+function disposeStub(value: unknown): void {
+  const key = (Symbol as { dispose?: symbol }).dispose;
+  if (!key || value === null || (typeof value !== "object" && typeof value !== "function")) return;
+  const dispose = (value as Record<symbol, unknown>)[key];
+  if (typeof dispose !== "function") return;
+  try {
+    dispose.call(value);
+  } catch {
+    // Disposal is best effort; it must never mask the real result or error.
+  }
+}
+
+/** The fields of `StreamVideo` Seekio reads, copied out so the RPC result can be disposed. */
+type VideoDetails = Pick<
+  StreamVideo,
+  "id" | "readyToStream" | "duration" | "created" | "thumbnail"
+> & {
+  state: string;
+  width: number | undefined;
+  height: number | undefined;
+};
+
+function copyDetails(video: StreamVideo): VideoDetails {
+  return {
+    id: video.id,
+    readyToStream: video.readyToStream,
+    duration: video.duration,
+    created: video.created,
+    thumbnail: video.thumbnail,
+    state: video.status.state,
+    width: video.input?.width,
+    height: video.input?.height,
+  };
+}
+
 type ThumbnailSource = { base: string; height: number; duration: number };
 
 function backendError(error: unknown, action: string): SeekioError {
@@ -120,7 +159,11 @@ export class CloudflareStreamBackend implements VideoBackend {
         requireSignedURLs: true,
         meta,
       });
-      return { videoId: upload.id, uploadUrl: upload.uploadURL, expiresAt };
+      try {
+        return { videoId: upload.id, uploadUrl: upload.uploadURL, expiresAt };
+      } finally {
+        disposeStub(upload);
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new SeekioError("UPLOAD_CREATE_FAILED", `Could not create an upload URL: ${detail}`);
@@ -130,25 +173,31 @@ export class CloudflareStreamBackend implements VideoBackend {
   async importFromUrl(input: ImportUrlInput): Promise<ImportedVideo> {
     const meta: Record<string, string> = { application: "seekio" };
     if (input.filename) meta.filename = input.filename;
-    let video: StreamVideo;
+    let id: string;
+    let state: string;
     try {
-      video = await this.stream.upload(input.url, { requireSignedURLs: true, meta });
+      const video = await this.stream.upload(input.url, { requireSignedURLs: true, meta });
+      try {
+        id = video.id;
+        state = video.status.state;
+      } finally {
+        disposeStub(video);
+      }
     } catch (error) {
       throw importError(error);
     }
-    const state = video.status.state;
     if (!isVideoStatus(state)) {
       throw new SeekioError(
         "BACKEND_ERROR",
         `Cloudflare Stream returned an unknown status "${state}".`,
       );
     }
-    return { videoId: video.id, status: state };
+    return { videoId: id, status: state };
   }
 
   async getInfo(videoId: string): Promise<VideoInfo> {
     const video = await this.details(videoId);
-    const state = video.status.state;
+    const state = video.state;
     if (!isVideoStatus(state)) {
       throw new SeekioError(
         "BACKEND_ERROR",
@@ -158,8 +207,8 @@ export class CloudflareStreamBackend implements VideoBackend {
     const ready = state === "ready" && video.readyToStream;
     const info: VideoInfo = { id: video.id, status: state };
     if (ready && video.duration > 0) info.duration = video.duration;
-    if (video.input?.width > 0) info.width = video.input.width;
-    if (video.input?.height > 0) info.height = video.input.height;
+    if (video.width !== undefined && video.width > 0) info.width = video.width;
+    if (video.height !== undefined && video.height > 0) info.height = video.height;
     if (video.created) info.createdAt = video.created;
     return info;
   }
@@ -207,16 +256,36 @@ export class CloudflareStreamBackend implements VideoBackend {
 
   async delete(videoId: string): Promise<void> {
     try {
-      await this.stream.video(videoId).delete();
+      await this.withVideo(videoId, (handle) => handle.delete());
     } catch (error) {
       if (isNotFound(error)) return;
       throw backendError(error, `delete video ${videoId}`);
     }
   }
 
-  private async details(videoId: string): Promise<StreamVideo> {
+  /** Borrows a video handle for one operation and always disposes it afterwards. */
+  private async withVideo<T>(
+    videoId: string,
+    fn: (handle: StreamVideoHandle) => Promise<T>,
+  ): Promise<T> {
+    const handle = this.stream.video(videoId);
     try {
-      return await this.stream.video(videoId).details();
+      return await fn(handle);
+    } finally {
+      disposeStub(handle);
+    }
+  }
+
+  private async details(videoId: string): Promise<VideoDetails> {
+    try {
+      return await this.withVideo(videoId, async (handle) => {
+        const video = await handle.details();
+        try {
+          return copyDetails(video);
+        } finally {
+          disposeStub(video);
+        }
+      });
     } catch (error) {
       if (isNotFound(error)) throw new SeekioError("VIDEO_NOT_FOUND", messages.notFound(videoId));
       throw backendError(error, `read video ${videoId}`);
@@ -231,14 +300,14 @@ export class CloudflareStreamBackend implements VideoBackend {
         const origin = new URL(video.thumbnail).origin;
         let token: string;
         try {
-          token = await this.stream.video(videoId).generateToken();
+          token = await this.withVideo(videoId, (handle) => handle.generateToken());
         } catch (error) {
           throw backendError(error, `sign video ${videoId}`);
         }
         // Never upscale: cap at the source height (unknown -> configured frameHeight).
-        const sourceHeight = video.input?.height;
+        const sourceHeight = video.height;
         const height =
-          sourceHeight > 0
+          sourceHeight !== undefined && sourceHeight > 0
             ? Math.min(sourceHeight, this.options.frameHeight)
             : this.options.frameHeight;
         return { base: `${origin}/${token}`, height, duration: video.duration };

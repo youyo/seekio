@@ -379,3 +379,104 @@ describe("CloudflareStreamBackend", () => {
     });
   });
 });
+
+describe("RPC stub disposal", () => {
+  /** Adds a Symbol.dispose spy to an object (handle or RPC result). */
+  function disposable<T extends object>(value: T) {
+    const dispose = vi.fn();
+    Object.defineProperty(value, Symbol.dispose, { value: dispose });
+    return { value, dispose };
+  }
+
+  function disposableHandle(methods: Handle) {
+    const h = disposable({ ...methods });
+    return { handle: h.value as Handle, dispose: h.dispose };
+  }
+
+  function streamWith(handle: Handle) {
+    return {
+      video: () => handle as unknown as StreamVideoHandle,
+      createDirectUpload: vi.fn(),
+      upload: vi.fn(),
+    } as unknown as StreamBinding;
+  }
+
+  it("disposes the handle and details result on getInfo (success and NotFound)", async () => {
+    const result = disposable(video());
+    const ok = disposableHandle({ details: async () => result.value });
+    await new CloudflareStreamBackend(streamWith(ok.handle), options).getInfo("abc");
+    expect(ok.dispose).toHaveBeenCalledTimes(1);
+    expect(result.dispose).toHaveBeenCalledTimes(1);
+
+    const missing = disposableHandle({ details: async () => Promise.reject(notFound()) });
+    await expect(
+      new CloudflareStreamBackend(streamWith(missing.handle), options).getInfo("x"),
+    ).rejects.toMatchObject({ code: "VIDEO_NOT_FOUND" });
+    expect(missing.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes handles on the thumbnail path, including when generateToken throws", async () => {
+    vi.stubGlobal("fetch", async () => new Response(new Uint8Array([0xff]), { status: 200 }));
+    const result = disposable(video());
+    const ok = disposableHandle({
+      details: async () => result.value,
+      generateToken: async () => "TOKEN",
+    });
+    const frame = await new CloudflareStreamBackend(streamWith(ok.handle), options).getFrame(
+      "abc",
+      1,
+    );
+    expect(frame.mimeType).toBe("image/jpeg");
+    expect(ok.dispose).toHaveBeenCalledTimes(2); // details + generateToken
+    expect(result.dispose).toHaveBeenCalledTimes(1);
+
+    const broken = disposableHandle({
+      details: async () => video(),
+      generateToken: async () => Promise.reject(new Error("boom")),
+    });
+    await expect(
+      new CloudflareStreamBackend(streamWith(broken.handle), options).getFrame("abc", 1),
+    ).rejects.toMatchObject({ code: "BACKEND_ERROR" });
+    expect(broken.dispose).toHaveBeenCalledTimes(2);
+  });
+
+  it("disposes the handle on delete (success, NotFound, other error)", async () => {
+    for (const outcome of [undefined, notFound(), new Error("503")]) {
+      const h = disposableHandle({
+        delete: async () => (outcome ? Promise.reject(outcome) : undefined),
+      });
+      await new CloudflareStreamBackend(streamWith(h.handle), options).delete("x").catch(() => {});
+      expect(h.dispose).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("disposes the upload() result on importFromUrl", async () => {
+    const result = disposable(video({ id: "imp" }));
+    const stream = { upload: async () => result.value } as unknown as StreamBinding;
+    const imported = await new CloudflareStreamBackend(stream, options).importFromUrl({
+      url: "https://example.com/foo.mp4",
+    });
+    expect(imported).toEqual({ videoId: "imp", status: "ready" });
+    expect(result.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes the upload() result even when the status is unknown", async () => {
+    const result = disposable(
+      video({ status: { state: "weird" } as unknown as StreamVideo["status"] }),
+    );
+    const stream = { upload: async () => result.value } as unknown as StreamBinding;
+    await expect(
+      new CloudflareStreamBackend(stream, options).importFromUrl({ url: "https://e.com/v.mp4" }),
+    ).rejects.toMatchObject({ code: "BACKEND_ERROR" });
+    expect(result.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes the createDirectUpload() result", async () => {
+    const result = disposable({ id: "vid", uploadURL: "https://u.example/vid" });
+    const stream = { createDirectUpload: async () => result.value } as unknown as StreamBinding;
+    const upload = await new CloudflareStreamBackend(stream, options).createUpload({});
+    expect(upload.videoId).toBe("vid");
+    expect(upload.uploadUrl).toBe("https://u.example/vid");
+    expect(result.dispose).toHaveBeenCalledTimes(1);
+  });
+});
