@@ -9,7 +9,11 @@ export const defaults = {
   maxFps: 30,
   overviewMaxFrames: 12,
   frameHeight: 720,
+  regionMaxLongEdge: 1568,
   frameFetchConcurrency: 6,
+  infoMaxWaitSeconds: 25,
+  infoPollIntervalMs: 2000,
+  videoRetentionHours: 24,
 } as const;
 
 export type SeekioConfig = { -readonly [K in keyof typeof defaults]: number };
@@ -21,7 +25,7 @@ function positiveInteger(raw: string | undefined, fallback: number): number {
 
 /** Resolves runtime configuration from Worker vars, falling back to `defaults` for missing or invalid values. */
 export function resolveConfig(
-  env: Pick<Env, "MAX_VIDEO_DURATION_SECONDS" | "UPLOAD_URL_TTL_SECONDS">,
+  env: Pick<Env, "MAX_VIDEO_DURATION_SECONDS" | "UPLOAD_URL_TTL_SECONDS" | "VIDEO_RETENTION_HOURS">,
 ): SeekioConfig {
   return {
     ...defaults,
@@ -30,5 +34,6 @@ export function resolveConfig(
       defaults.maxVideoDurationSeconds,
     ),
     uploadUrlTtlSeconds: positiveInteger(env.UPLOAD_URL_TTL_SECONDS, defaults.uploadUrlTtlSeconds),
+    videoRetentionHours: positiveInteger(env.VIDEO_RETENTION_HOURS, defaults.videoRetentionHours),
   };
 }

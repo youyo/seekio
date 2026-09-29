@@ -3,8 +3,9 @@ import pkg from "../../package.json";
 import type { SeekioConfig } from "../config";
 import { log } from "../log";
 import type { VideoBackend, VideoInfo } from "../video/backend";
+import type { ImageCropper } from "../video/image";
 import { isSeekioError, messages, SeekioError, type SeekioErrorCode } from "./errors";
-import { instructions } from "./instructions";
+import { buildInstructions } from "./instructions";
 import { registerCreateUpload } from "./tools/create-upload";
 import { registerDelete } from "./tools/delete";
 import { registerFrame } from "./tools/frame";
@@ -18,6 +19,10 @@ export const serverInfo = { name: "seekio", version: pkg.version } as const;
 export type ToolDeps = {
   backend: VideoBackend;
   config: SeekioConfig;
+  /** Crops `video_frame` regions. Absent when the Images binding is not configured. */
+  cropper?: ImageCropper;
+  /** Waits for `ms` milliseconds. Defaults to a real timer; tests inject a fake. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 /** Error codes that originate in the video provider and therefore deserve a `backend.error` log line. */
@@ -25,6 +30,7 @@ const BACKEND_ERROR_CODES = new Set<SeekioErrorCode>([
   "BACKEND_ERROR",
   "FRAME_FETCH_FAILED",
   "UPLOAD_CREATE_FAILED",
+  "REGION_CROP_FAILED",
 ]);
 
 type ToolResult = {
@@ -82,7 +88,9 @@ export async function requireReady(
 }
 
 export function createSeekioServer(deps: ToolDeps): McpServer {
-  const server = new McpServer(serverInfo, { instructions });
+  const server = new McpServer(serverInfo, {
+    instructions: buildInstructions(deps.config.videoRetentionHours),
+  });
   registerCreateUpload(server, deps);
   registerImportUrl(server, deps);
   registerInfo(server, deps);

@@ -6,9 +6,18 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "stream": { "binding": "STREAM", "remote": true },
+  // Crops video_frame regions. remote: true because the local (offline) simulation only supports
+  // width/height/rotate/format, so trim would not work under `wrangler dev`.
+  // Billing: free tier is 5,000 unique transformations per month; a transformation is unique per
+  // (source image, parameters) pair and is billed once a month. `.info()` is free.
+  "images": { "binding": "IMAGES", "remote": true },
   "vars": {
     // Public, non-secret tuning knobs. Secrets (SEEKIO_AUTH_TOKEN) are set with `wrangler secret put`.
     "MAX_VIDEO_DURATION_SECONDS": "300",
-    "UPLOAD_URL_TTL_SECONDS": "900"
-  }
+    "UPLOAD_URL_TTL_SECONDS": "900",
+    "VIDEO_RETENTION_HOURS": "24"
+  },
+  // Hourly cleanup of expired videos (see src/video/cleanup.ts). Videos live up to
+  // VIDEO_RETENTION_HOURS plus up to an hour of cron delay.
+  "triggers": { "crons": ["0 * * * *"] }
 }

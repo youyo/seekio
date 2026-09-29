@@ -11,8 +11,9 @@
  * cannot be re-run with the same URL while the earlier video exists; the test deletes its video
  * at the end, but if a run aborts midway, delete the leftover video or use a different URL.
  */
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { execFile } from "node:child_process";
+import { basename, resolve } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { McpHttpClient, type ToolResult } from "./mcp-client";
 
@@ -20,7 +21,33 @@ const MCP_URL = process.env.SEEKIO_MCP_URL;
 const FIXTURE = process.env.SEEKIO_FIXTURE_VIDEO;
 const FIXTURE_URL = process.env.SEEKIO_FIXTURE_VIDEO_URL;
 const READY_TIMEOUT_MS = 5 * 60 * 1000;
-const POLL_INTERVAL_MS = 5000;
+const WAIT_SECONDS = 25;
+const execFileAsync = promisify(execFile);
+
+/** Escapes a path for the `-F 'file=@"<PATH>"'` slot of upload_command. */
+function escapeUploadPath(path: string): string {
+  if (path.includes("'")) {
+    throw new Error(
+      `SEEKIO_FIXTURE_VIDEO resolves to a path containing a single quote (${path}); upload_command cannot represent it. Move the fixture to a path without '.`,
+    );
+  }
+  return path.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+type InfoResult = { status: string; duration?: number; ready: boolean };
+
+/** Calls video_info with wait_seconds until the video is ready, errored, or the deadline passes. */
+async function waitUntilReady(client: McpHttpClient, videoId: string): Promise<InfoResult> {
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  let info: InfoResult = { status: "", ready: false };
+  while (Date.now() < deadline) {
+    info = json(
+      await client.callTool("video_info", { video_id: videoId, wait_seconds: WAIT_SECONDS }),
+    );
+    if (info.ready || info.status === "error") break;
+  }
+  return info;
+}
 
 function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -53,7 +80,10 @@ function expectJpegImages(result: ToolResult, expectedCount: number): void {
   result.content.forEach((content, index) => {
     if (content.type === "image") {
       const previous = result.content[index - 1];
-      expect(previous?.type === "text" && /^Frame at [\d.]+s$/.test(previous.text)).toBe(true);
+      expect(
+        previous?.type === "text" &&
+          /^Frame at [\d.]+s(, region .+ \(\d+x\d+ px\))?$/.test(previous.text),
+      ).toBe(true);
     }
   });
 }
@@ -69,28 +99,19 @@ describeIf("Seekio against real Cloudflare Stream", () => {
       expect(init.serverInfo.name).toBe("seekio");
       expect((await client.listTools()).tools).toHaveLength(7);
 
-      const upload = json<{ video_id: string; upload_url: string }>(
+      const upload = json<{ video_id: string; upload_url: string; upload_command: string }>(
         await client.callTool("video_create_upload", { filename: basename(FIXTURE as string) }),
       );
-      const form = new FormData();
-      form.append(
-        "file",
-        new Blob([await readFile(FIXTURE as string)]),
-        basename(FIXTURE as string),
+      expect(upload.upload_command).toContain("<PATH>");
+      // Run the returned command in a real shell, substituting the fixture's absolute path the way
+      // an agent would: `"` and `\` are backslash-escaped for curl, `'` cannot be represented.
+      const command = upload.upload_command.replace("<PATH>", () =>
+        escapeUploadPath(resolve(FIXTURE as string)),
       );
-      const uploadResponse = await fetch(upload.upload_url, { method: "POST", body: form });
-      expect(uploadResponse.ok).toBe(true);
+      const { stdout } = await execFileAsync("sh", ["-c", command]);
+      expect(stdout).toBeTypeOf("string");
 
-      const deadline = Date.now() + READY_TIMEOUT_MS;
-      let info: { status: string; duration?: number; ready: boolean } = {
-        status: "",
-        ready: false,
-      };
-      while (Date.now() < deadline) {
-        info = json(await client.callTool("video_info", { video_id: upload.video_id }));
-        if (info.ready || info.status === "error") break;
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      }
+      const info = await waitUntilReady(client, upload.video_id);
       expect(info.ready).toBe(true);
       const duration = info.duration as number;
 
@@ -114,6 +135,18 @@ describeIf("Seekio against real Cloudflare Stream", () => {
         at: duration / 2,
       });
       expectJpegImages(frame, 1);
+
+      // region: crop the bottom 20% of the source-resolution frame through the Images binding.
+      const cropped = await client.callTool("video_frame", {
+        video_id: upload.video_id,
+        at: duration / 2,
+        region: { x: 0, y: 0.8, width: 1, height: 0.2 },
+      });
+      expectJpegImages(cropped, 1);
+      const caption = cropped.content[0];
+      expect(caption?.type === "text" ? caption.text : "").toMatch(
+        /region x=0 y=0\.8 w=1 h=0\.2 \(\d+x\d+ px\)/,
+      );
 
       const first = json<{ deleted: boolean }>(
         await client.callTool("video_delete", { video_id: upload.video_id }),
@@ -142,16 +175,7 @@ describeUrlIf("Seekio video_import_url against real Cloudflare Stream", () => {
       );
       expect(imported.video_id).toBeTruthy();
 
-      const deadline = Date.now() + READY_TIMEOUT_MS;
-      let info: { status: string; duration?: number; ready: boolean } = {
-        status: "",
-        ready: false,
-      };
-      while (Date.now() < deadline) {
-        info = json(await client.callTool("video_info", { video_id: imported.video_id }));
-        if (info.ready || info.status === "error") break;
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      }
+      const info = await waitUntilReady(client, imported.video_id);
       expect(info.ready).toBe(true);
       const duration = info.duration as number;
 

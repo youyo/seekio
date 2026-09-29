@@ -6,6 +6,8 @@ export type LogEvent =
   | "frames.requested"
   | "frame.requested"
   | "video.deleted"
+  | "cleanup.completed"
+  | "cleanup.failed"
   | "backend.error"
   | "auth.rejected";
 

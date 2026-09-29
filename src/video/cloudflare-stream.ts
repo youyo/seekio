@@ -2,8 +2,10 @@ import { messages, SeekioError } from "../mcp/errors";
 import type {
   CreateUploadInput,
   Frame,
+  FrameOptions,
   ImportedVideo,
   ImportUrlInput,
+  ListedVideo,
   Upload,
   VideoBackend,
   VideoInfo,
@@ -14,7 +16,20 @@ export type CloudflareStreamOptions = {
   frameHeight: number;
   uploadUrlTtlSeconds: number;
   maxVideoDurationSeconds: number;
+  /** Clock in epoch milliseconds. Defaults to `Date.now`; tests inject a fixed one. */
+  now?: () => number;
 };
+
+/**
+ * Stream only accepts a scheduledDeletion at least 30 days after upload, so it cannot enforce the
+ * short retention (the cron cleanup does). 31 days is a safety net that clears that minimum.
+ */
+const SAFETY_NET_DELETION_DAYS = 31;
+
+/** `videos.list` page size. */
+const LIST_PAGE_SIZE = 100;
+/** Upper bound on list pages per cleanup run (guards against a runaway loop). */
+const LIST_MAX_PAGES = 100;
 
 const VIDEO_STATUSES: readonly VideoStatus[] = [
   "pendingupload",
@@ -112,6 +127,7 @@ type VideoDetails = Pick<
   "id" | "readyToStream" | "duration" | "created" | "thumbnail"
 > & {
   state: string;
+  pctComplete: string | undefined;
   width: number | undefined;
   height: number | undefined;
 };
@@ -124,12 +140,20 @@ function copyDetails(video: StreamVideo): VideoDetails {
     created: video.created,
     thumbnail: video.thumbnail,
     state: video.status.state,
+    pctComplete: video.status.pctComplete,
     width: video.input?.width,
     height: video.input?.height,
   };
 }
 
-type ThumbnailSource = { base: string; height: number; duration: number };
+type ThumbnailSource = {
+  base: string;
+  /** min(source height, frameHeight); the source height itself is unknown when 0. */
+  height: number;
+  /** Source video height (unknown -> frameHeight). */
+  fullHeight: number;
+  duration: number;
+};
 
 function backendError(error: unknown, action: string): SeekioError {
   const detail = error instanceof Error ? error.message : String(error);
@@ -148,8 +172,16 @@ export class CloudflareStreamBackend implements VideoBackend {
     this.options = options;
   }
 
+  private now(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
+  private safetyNetDeletion(): string {
+    return new Date(this.now() + SAFETY_NET_DELETION_DAYS * 86_400_000).toISOString();
+  }
+
   async createUpload(input: CreateUploadInput): Promise<Upload> {
-    const expiresAt = new Date(Date.now() + this.options.uploadUrlTtlSeconds * 1000).toISOString();
+    const expiresAt = new Date(this.now() + this.options.uploadUrlTtlSeconds * 1000).toISOString();
     const meta: Record<string, string> = { application: "seekio" };
     if (input.filename) meta.filename = input.filename;
     try {
@@ -157,6 +189,7 @@ export class CloudflareStreamBackend implements VideoBackend {
         maxDurationSeconds: input.maxDurationSeconds ?? this.options.maxVideoDurationSeconds,
         expiry: expiresAt,
         requireSignedURLs: true,
+        scheduledDeletion: this.safetyNetDeletion(),
         meta,
       });
       try {
@@ -176,7 +209,11 @@ export class CloudflareStreamBackend implements VideoBackend {
     let id: string;
     let state: string;
     try {
-      const video = await this.stream.upload(input.url, { requireSignedURLs: true, meta });
+      const video = await this.stream.upload(input.url, {
+        requireSignedURLs: true,
+        scheduledDeletion: this.safetyNetDeletion(),
+        meta,
+      });
       try {
         id = video.id;
         state = video.status.state;
@@ -210,17 +247,20 @@ export class CloudflareStreamBackend implements VideoBackend {
     if (video.width !== undefined && video.width > 0) info.width = video.width;
     if (video.height !== undefined && video.height > 0) info.height = video.height;
     if (video.created) info.createdAt = video.created;
+    const pct = video.pctComplete === undefined ? Number.NaN : Number.parseFloat(video.pctComplete);
+    if (Number.isFinite(pct) && pct >= 0 && pct <= 100) info.pctComplete = pct;
     return info;
   }
 
-  async getFrame(videoId: string, timestamp: number): Promise<Frame> {
+  async getFrame(videoId: string, timestamp: number, options?: FrameOptions): Promise<Frame> {
     const source = await this.thumbnailSource(videoId);
-    const first = await this.fetchThumbnail(source, timestamp);
+    const height = options?.fullResolution ? source.fullHeight : source.height;
+    const first = await this.fetchThumbnail(source, timestamp, height);
     if (first.ok) return first.frame;
     const nearEnd = source.duration - timestamp <= END_RETRY_WINDOW_SECONDS;
     if (nearEnd && first.status >= 400 && first.status < 500) {
       for (const earlier of retryTimestamps(timestamp)) {
-        const retry = await this.fetchThumbnail(source, earlier);
+        const retry = await this.fetchThumbnail(source, earlier, height);
         if (retry.ok) return retry.frame;
       }
     }
@@ -233,10 +273,11 @@ export class CloudflareStreamBackend implements VideoBackend {
   private async fetchThumbnail(
     source: ThumbnailSource,
     timestamp: number,
+    height: number,
   ): Promise<{ ok: true; frame: Frame } | { ok: false; status: number }> {
     const url = new URL(`${source.base}/thumbnails/thumbnail.jpg`);
     url.searchParams.set("time", `${timestamp}s`);
-    url.searchParams.set("height", String(source.height));
+    url.searchParams.set("height", String(height));
     url.searchParams.set("fit", "scale");
     let response: Response;
     try {
@@ -252,6 +293,53 @@ export class CloudflareStreamBackend implements VideoBackend {
       ok: true,
       frame: { timestamp, mimeType: "image/jpeg", data: await response.arrayBuffer() },
     };
+  }
+
+  /**
+   * Lists videos whose `meta.application` is exactly "seekio". Stream returns newest first and has
+   * no cursor, so pages are walked with `before` = oldest `created` seen, inclusive (`lte`) so a
+   * timestamp tie at a page boundary is not skipped; ids already seen are ignored. It stops on a
+   * short page, or when a page adds no new video (e.g. more than a page share one timestamp).
+   */
+  async listVideos(): Promise<ListedVideo[]> {
+    const seen = new Set<string>();
+    const found: ListedVideo[] = [];
+    let before: string | undefined;
+    try {
+      for (let page = 0; page < LIST_MAX_PAGES; page++) {
+        const videos = await this.stream.videos.list({
+          limit: LIST_PAGE_SIZE,
+          ...(before !== undefined && { before, beforeComp: "lte" as const }),
+        });
+        let count = 0;
+        let added = 0;
+        let oldest: { time: number; raw: string } | undefined;
+        try {
+          for (const video of videos) {
+            count++;
+            const id = video.id;
+            const created = video.created;
+            const application = video.meta?.application;
+            disposeStub(video);
+            const time = Date.parse(created);
+            if (Number.isFinite(time) && (!oldest || time < oldest.time)) {
+              oldest = { time, raw: created };
+            }
+            if (seen.has(id)) continue;
+            seen.add(id);
+            added++;
+            if (application === "seekio") found.push({ videoId: id, createdAt: created });
+          }
+        } finally {
+          disposeStub(videos);
+        }
+        if (count < LIST_PAGE_SIZE || added === 0 || !oldest) break;
+        before = oldest.raw;
+      }
+    } catch (error) {
+      throw backendError(error, "list videos");
+    }
+    return found;
   }
 
   async delete(videoId: string): Promise<void> {
@@ -310,7 +398,9 @@ export class CloudflareStreamBackend implements VideoBackend {
           sourceHeight !== undefined && sourceHeight > 0
             ? Math.min(sourceHeight, this.options.frameHeight)
             : this.options.frameHeight;
-        return { base: `${origin}/${token}`, height, duration: video.duration };
+        const fullHeight =
+          sourceHeight !== undefined && sourceHeight > 0 ? sourceHeight : this.options.frameHeight;
+        return { base: `${origin}/${token}`, height, fullHeight, duration: video.duration };
       })();
       this.thumbnailSources.set(videoId, source);
     }
