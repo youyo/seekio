@@ -5,6 +5,7 @@ export type LogEvent =
   | "overview.requested"
   | "frames.requested"
   | "frame.requested"
+  | "transcript.requested"
   | "video.deleted"
   | "cleanup.completed"
   | "cleanup.failed"

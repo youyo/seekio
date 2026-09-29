@@ -12,7 +12,7 @@ export function registerFrames(server: McpServer, deps: ToolDeps): void {
     "video_frames",
     {
       title: "Video frames in range",
-      description: `Inspect a time range at higher temporal resolution: returns frames from start to end at fps as timestamped images. At most ${maxFramesPerCall} frames per call and ${maxFps} fps; narrow the range or lower fps instead of scanning the whole video. Use video_frame for one exact timestamp.`,
+      description: `Inspect a time range at higher temporal resolution: returns frames from start to end at fps as timestamped images. At most ${maxFramesPerCall} frames per call and ${maxFps} fps; narrow the range or lower fps instead of scanning the whole video. The number of frames requested is floor((end - start) * fps) + 1, so end is included when it lies exactly on the start + i / fps grid (start 0, end 13, fps 1 gives 14 frames; start 138, end 150.8, fps 1 gives 13); to stay within the limit, end must be at most start + ${maxFramesPerCall - 1} / fps. Timestamps are floored to milliseconds and clamped to just before the end of the video (duplicates removed), so a range that reaches the end of the video can return fewer frames than the formula. Use video_frame for one exact timestamp.`,
       inputSchema: z.object({
         video_id: videoIdSchema,
         start: z.number().min(0).describe("Range start in seconds (inclusive)."),
@@ -38,6 +38,7 @@ export function registerFrames(server: McpServer, deps: ToolDeps): void {
           video_id,
           timestamps,
           deps.config.frameFetchConcurrency,
+          { maxNotFoundRetries: deps.config.frameRetryMultiMax, retryEarlier: false },
         );
         log("frames.requested", {
           video_id,

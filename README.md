@@ -27,7 +27,9 @@ pulls the exact frame it needs. The main use case is frontend debugging:
 
 Seekio itself does no video understanding, no inference, and no storage of its
 own. Cloudflare Stream stores and encodes the video; Seekio turns timestamps
-into JPEG frames and hands them to the agent as MCP image content.
+into JPEG frames and hands them to the agent as MCP image content. For speech,
+`video_transcript` returns Cloudflare Stream's own AI captions with times
+(Seekio does no speech recognition itself).
 
 ## Architecture
 
@@ -47,6 +49,7 @@ Claude Code / Codex / MCP Client
 │ video_overview               │
 │ video_frames                 │
 │ video_frame                  │
+│ video_transcript             │
 │ video_delete                 │
 └──────────────┬───────────────┘
                │ Stream binding
@@ -55,6 +58,7 @@ Claude Code / Codex / MCP Client
 │ Cloudflare Stream            │
 │ upload / store / encode      │
 │ metadata / thumbnails/delete │
+│ AI captions (transcript)     │
 └──────────────────────────────┘
 ```
 
@@ -178,7 +182,7 @@ claude mcp add --transport http seekio https://seekio.example.workers.dev/mcp \
 
 ## Tool reference
 
-All tools return JSON or text in `text` content; frames are `image` content (`image/jpeg`, base64). Errors come back as `isError: true` with `[CODE] message`, where the message tells the agent what to do next (for example `[TOO_MANY_FRAMES] Requested 16 frames, but Seekio allows at most 15 frames per call. Narrow the interval or reduce fps.`).
+All tools return JSON or text in `text` content; frames are `image` content (`image/jpeg`, base64). Errors come back as `isError: true` with `[CODE] message`, where the message tells the agent what to do next (for example `[TOO_MANY_FRAMES] Requested 16 frames (start 0s, end 1.5s, fps 10), but Seekio allows at most 15 frames per call. The frame count is floor((end - start) * fps) + 1. With start 0 and fps 10, end can be at most 1.4s. To keep end at 1.5s, lower fps to 9.333 or less. Or narrow the range.`).
 
 ### `video_create_upload`
 
@@ -191,7 +195,7 @@ All tools return JSON or text in `text` content; frames are `image` content (`im
 {
   "video_id": "abc123",
   "upload_url": "https://upload.cloudflarestream.com/...",
-  "upload_command": "curl -sS --fail-with-body -X POST -F 'file=@\"<PATH>\"' 'https://upload.cloudflarestream.com/...'",
+  "upload_command": "curl -sS --fail-with-body -X POST -F 'file=@\"<PATH>\"' 'https://upload.cloudflarestream.com/...' && printf '\\n%s\\n' 'uploaded video_id=abc123'",
   "expires_at": "2026-01-01T00:15:00.000Z",
   "max_duration_seconds": 300,
   "max_upload_bytes": 209715200,
@@ -202,6 +206,8 @@ All tools return JSON or text in `text` content; frames are `image` content (`im
 The server cannot read local files, so uploading is a separate step: replace `<PATH>` in `upload_command` with the local file path and run it in a shell, then call `video_info` with `wait_seconds` until `ready`. `upload_command` is equivalent to `POST upload_url` as `multipart/form-data` (field `file`), which must happen before `expires_at` (15 minutes by default). Uploads over 200 MB are not supported in v1.
 
 `<PATH>` sits inside a single-quoted shell string and a double-quoted curl filename (`-F 'file=@"<PATH>"'`), so paths with spaces, `;`, `,`, `$` or backticks work as they are. Inside `<PATH>`, escape every `"` and `\` with a backslash, and do not use a single quote `'` in the path (copy the file to another path first). `--fail-with-body` needs curl 7.76 or newer.
+
+On success the command prints `uploaded video_id=<video_id>` as its last line (any response body from Stream comes before it, on a line of its own). On failure curl exits non-zero, prints the error body, and the `uploaded` line is not printed, so check either the exit code or the last line.
 
 ### `video_import_url`
 
@@ -231,6 +237,8 @@ The duration limit cannot be enforced up front for imports: once the video is `r
 
 `delete_after` (ISO time, creation time plus the retention) tells when the automatic cleanup will consider the video expired; it is omitted when Stream does not report a creation time. While the video is encoding, `pct_complete` (0 to 100) is included when Stream reports it; the field is omitted otherwise.
 
+`ready` and `pct_complete` mean different things. `ready: true` means the video can be played and thumbnails can be taken, which is all the frame tools need. `pct_complete` is the progress of encoding every quality level and can still be below 100 when `ready` is already `true`; do not wait for it to reach 100.
+
 `status` is one of `pendingupload`, `downloading`, `queued`, `inprogress`, `ready`, `error`. Frame tools refuse to run until `ready` is `true`:
 
 ```text
@@ -258,6 +266,10 @@ Returns a summary line followed by `Frame at <t>s` / image pairs in timestamp or
 
 Timestamps are `start + index / fps` (no floating point accumulation). At most 15 frames per call; Seekio never lowers `fps` on its own, it returns `TOO_MANY_FRAMES` instead.
 
+**How many frames you get.** The number of frames requested is `floor((end - start) * fps) + 1`. `end` is included when it lies exactly on the `start + i / fps` grid, so the count depends on whether the end falls on the grid: `start: 0, end: 13, fps: 1` gives 14 frames, while `start: 138, end: 150.8, fps: 1` gives 13 (150.8 is not on the grid; the last frame is at 150 s). To stay within 15 frames, `end` must be at most `start + 14 / fps`. Two things can make the result smaller than the formula: timestamps are floored to milliseconds and clamped to just before the end of the video (1 ms short of `duration`), and duplicates produced by the clamp are removed. The limit check uses the formula's count, before clamping.
+
+`TOO_MANY_FRAMES` reports the requested count, the largest `end` that fits for the given `start` and `fps` (millisecond precision), and the highest `fps` that fits the same range.
+
 ### `video_frame`
 
 | Input | Type | Notes |
@@ -269,6 +281,39 @@ Timestamps are `start + index / fps` (no floating point accumulation). At most 1
 Returns `Frame at 3.347s` followed by one image (whole frames are capped at 720px tall).
 
 With `region`, Seekio fetches the frame at the source video's resolution and crops the rectangle through the Cloudflare Images binding, so small text (credits, captions) stays readable. The result is a JPEG whose long edge is at most 1568px (shrunk if larger, never enlarged), and the caption reports the crop, e.g. `Frame at 3.347s, region x=0 y=0.8 w=1 h=0.2 (1568x176 px)`. Errors: `INVALID_REGION` (bad values), `REGION_UNAVAILABLE` (the Worker has no `IMAGES` binding), `REGION_CROP_FAILED` (the Images transformation failed, for example because the free tier of 5,000 unique transformations per month is exhausted). In the last two cases call `video_frame` again without `region`, or wait and retry. `region` is only available on `video_frame`.
+
+### `video_transcript`
+
+Returns what is said in the video as timestamped text, using Cloudflare Stream's AI captions. It does not play audio and does not analyze sound; it only returns the speech-to-text with times.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `video_id` | string | |
+| `languages` | array of 1 to 3 strings | Spoken languages, from `cs`, `nl`, `en`, `fr`, `de`, `it`, `ja`, `ko`, `pl`, `pt`, `ru`, `es`. No duplicates. Plain codes only: `en-US` is rejected |
+| `start` | number, optional | Only cues that overlap `[start, end]` are returned. Default 0 |
+| `end` | number, optional | `> start`, `<= duration`. Default: the video duration |
+| `wait_seconds` | integer, optional | 0 to 25, same behavior as `video_info` |
+
+```json
+{
+  "video_id": "abc123",
+  "transcripts": [
+    {
+      "language": "ja",
+      "status": "ready",
+      "cues": [{ "start": 1.24, "end": 3.9, "text": "こんにちは" }]
+    },
+    { "language": "en", "status": "inprogress" }
+  ],
+  "note": "Some languages are still being generated. Call video_transcript again with wait_seconds (up to 25) to wait for them."
+}
+```
+
+`start` and `end` of a cue are seconds with millisecond precision, the same unit as `at` of `video_frame`, so they can be compared directly. Cue times are accurate to about ±0.5 seconds; one sentence may be split into several cues, and zero-length cues are dropped.
+
+**Language handling.** Stream does not detect the language: you must say which language is spoken. For a video that mixes languages, or when you do not know, pass the candidates together (for example `["ja", "en"]`). Each language's result is only reliable in the parts where that language is spoken; the other parts come out as misrecognized or hallucinated text (for example a stock sign-off phrase), so ignore them.
+
+The first call starts caption generation for each language that has none yet (about 10 seconds for a 3-minute video); a language that is still being generated has `status: "inprogress"`, so call again with `wait_seconds`. `status: "error"` (with a `message`) marks a language that failed. If every language failed the call returns `isError`. Captions stay with the video and are deleted with it. Errors: `NO_AUDIO_TRACK` (the video has no audio), `UNSUPPORTED_LANGUAGE`, `TRANSCRIPT_FAILED`.
 
 ### `video_delete`
 
@@ -295,6 +340,10 @@ User: "Around 3 seconds the drawer flashes to the left for a moment. Find the ca
 
 The server instructions embedded in Seekio steer agents toward this progressive pattern: whole video → suspicious range → higher-FPS range → exact frame.
 
+### Checking subtitles against the voice
+
+To see whether the subtitles burned into a video line up with the narration: call `video_transcript` with the spoken language(s) to get when each phrase is said, then call `video_frames` (or `video_frame`) on the times just before and after those cues and compare the on-screen subtitle with the cue text. Allow about ±0.5 seconds of slack in the cue times.
+
 ### When you already know the time
 
 The progressive pattern is for videos you have not seen. If you already know when to look (for example the on-screen text or credits at a specific second), skip `video_overview`: call `video_info` (with `wait_seconds`) to confirm the video is `ready`, then call `video_frame` with `at`, or `video_frames` with a narrow `start` / `end` range around that time.
@@ -316,6 +365,7 @@ Whole-frame images are downscaled, so fine print such as end credits can be unre
 | Max fps | 30 | `src/config.ts` |
 | Frame height | min(source height, 720 px); never upscaled | `src/config.ts` |
 | Concurrent frame fetches | 6 | `src/config.ts` |
+| Retries on thumbnail HTTP 404 | `video_frame`: 3 (1 s, 2 s, 4 s); `video_frames` / `video_overview`: 1 per frame (1 s) | `src/config.ts` (Stream can return 404 intermittently for a few minutes after a video becomes `ready`; the retries stay small to respect the Workers subrequest limit) |
 
 ## Optional MCP Server Portal integration
 
@@ -338,7 +388,7 @@ mise run portal:dry-run   # show changes only
 mise run portal           # apply
 ```
 
-The script creates the MCP server entry if missing, updates it when the URL or auth type drifts, syncs its tool list, and ensures the portal mapping exposes all seven tools without aliases. Running it twice is a no-op. Worker deploys (`mise run deploy`) never touch the portal.
+The script creates the MCP server entry if missing, updates it when the URL or auth type drifts, syncs its tool list, and ensures the portal mapping exposes all Seekio tools without aliases. Running it twice is a no-op. Worker deploys (`mise run deploy`) never touch the portal.
 
 `SEEKIO_PORTAL_AUTH` selects the server's `auth_type`. When unset, it is `bearer` if `SEEKIO_AUTH_TOKEN` is set and `unauthenticated` otherwise. `bearer` requires `SEEKIO_AUTH_TOKEN`; `oauth` never sends a token. Use `oauth` when the Worker is protected by Cloudflare Access with Managed OAuth.
 

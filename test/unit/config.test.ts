@@ -29,3 +29,13 @@ describe("resolveConfig", () => {
     },
   );
 });
+
+describe("frame retry defaults", () => {
+  it("keeps the 404 retry counts small enough for the Workers subrequest limit", () => {
+    expect(defaults.frameRetrySingleMax).toBe(3);
+    expect(defaults.frameRetryMultiMax).toBe(1);
+    expect(defaults.frameRetryBaseDelayMs).toBe(1000);
+    // 15 frames x (1 + multi retries) thumbnail requests stays under the free plan's 50.
+    expect(defaults.maxFramesPerCall * (1 + defaults.frameRetryMultiMax)).toBeLessThanOrEqual(50);
+  });
+});

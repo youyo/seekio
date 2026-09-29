@@ -354,6 +354,26 @@ describe("CloudflareStreamBackend", () => {
     expect(await heightOf(undefined)).toBe("720");
   });
 
+  it("does not put the raw network error message (which may contain the URL) in frame errors", async () => {
+    const { stream } = fakeStream({
+      details: async () => video(),
+      generateToken: async () => "SECRET",
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", async (input: URL) => {
+      const error = new TypeError(`fetch failed for ${String(input)}`);
+      throw error;
+    });
+    const harness = createHarness(new CloudflareStreamBackend(stream, options));
+    const result = await harness.callTool("video_frame", { video_id: "abc", at: 1 });
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toMatch(/^\[FRAME_FETCH_FAILED\]/);
+    expect(text).toContain("TypeError");
+    expect(text).not.toContain("SECRET");
+    expect(text).not.toContain("cloudflarestream.com");
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("SECRET");
+  });
+
   it("reports non-200 thumbnail responses as FRAME_FETCH_FAILED without leaking the token", async () => {
     const { stream } = fakeStream({
       details: async () => video(),
@@ -686,5 +706,307 @@ describe("CloudflareStreamBackend.listVideos", () => {
     }
     await new CloudflareStreamBackend(stream, options).listVideos();
     expect(dispose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("thumbnail 404 retry", () => {
+  const timeOf = (input: URL) => new URL(input).searchParams.get("time");
+
+  function setup(duration = 150.8) {
+    const sleeps: number[] = [];
+    const { stream } = fakeStream({
+      details: async () => video({ duration }),
+      generateToken: async () => "SECRET",
+    });
+    const backend = new CloudflareStreamBackend(stream, {
+      ...options,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    return { backend, sleeps };
+  }
+
+  /** Answers with the given statuses in order; the last one repeats. */
+  function stubStatuses(statuses: number[]) {
+    let i = 0;
+    const fetchMock = vi.fn(async (_input: URL) => {
+      const status = statuses[Math.min(i++, statuses.length - 1)] as number;
+      return status === 200
+        ? new Response(new Uint8Array([0xff]), { status })
+        : new Response("no", { status });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("retries the same time on 404 and succeeds", async () => {
+    const fetchMock = stubStatuses([404, 200]);
+    const { backend, sleeps } = setup();
+    const frame = await backend.getFrame("abc", 148.5, { maxNotFoundRetries: 3 });
+    expect(frame.timestamp).toBe(148.5);
+    expect(fetchMock.mock.calls.map((c) => timeOf(c[0]))).toEqual(["148.5s", "148.5s"]);
+    expect(sleeps).toEqual([1000]);
+  });
+
+  it("gives up after the given number of retries with backoff 1s, 2s, 4s", async () => {
+    const fetchMock = stubStatuses([404]);
+    const { backend, sleeps } = setup();
+    const error = await backend.getFrame("abc", 30, { maxNotFoundRetries: 3 }).catch((e) => e);
+    expect(error.code).toBe("FRAME_FETCH_FAILED");
+    expect(error.message).toContain("404");
+    expect(error.message).not.toContain("SECRET");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(sleeps).toEqual([1000, 2000, 4000]);
+  });
+
+  it("retries at most once with 1s for multi-frame calls", async () => {
+    const fetchMock = stubStatuses([404]);
+    const { backend, sleeps } = setup();
+    await backend.getFrame("abc", 30, { maxNotFoundRetries: 1 }).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([1000]);
+  });
+
+  it("does not retry 404 by default", async () => {
+    const fetchMock = stubStatuses([404]);
+    const { backend, sleeps } = setup();
+    await backend.getFrame("abc", 30).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("does not retry non-404 statuses away from the end", async () => {
+    for (const status of [400, 403, 503]) {
+      const fetchMock = stubStatuses([status]);
+      const { backend, sleeps } = setup();
+      await backend.getFrame("abc", 30, { maxNotFoundRetries: 3 }).catch(() => {});
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(sleeps).toEqual([]);
+    }
+  });
+
+  it("combines with the end-of-video retry: 404 retries first, then earlier times once each", async () => {
+    const fetchMock = stubStatuses([404]);
+    const { backend, sleeps } = setup(52.21);
+    const error = await backend.getFrame("abc", 52.209, { maxNotFoundRetries: 1 }).catch((e) => e);
+    expect(error.code).toBe("FRAME_FETCH_FAILED");
+    expect(fetchMock.mock.calls.map((c) => timeOf(c[0]))).toEqual([
+      "52.209s",
+      "52.209s",
+      "52.109s",
+      "51.709s",
+      "51.209s",
+    ]);
+    expect(sleeps).toEqual([1000]);
+  });
+
+  it("does not step back to earlier times when retryEarlier is false, and still advises", async () => {
+    const fetchMock = stubStatuses([400]);
+    const { backend } = setup(52.21);
+    const error = await backend
+      .getFrame("abc", 52.209, { maxNotFoundRetries: 1, retryEarlier: false })
+      .catch((e) => e);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.message).toMatch(/earlier time/i);
+    fetchMock.mockClear();
+    stubStatuses([404]);
+    const notFoundFetch = stubStatuses([404]);
+    await setup(52.21)
+      .backend.getFrame("abc", 52.209, { maxNotFoundRetries: 1, retryEarlier: false })
+      .catch(() => {});
+    expect(notFoundFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses an earlier time after 404 retries are exhausted near the end", async () => {
+    stubStatuses([404, 404, 200]);
+    const { backend } = setup(52.21);
+    const frame = await backend.getFrame("abc", 52.209, { maxNotFoundRetries: 1 });
+    expect(frame.timestamp).toBe(52.109);
+  });
+
+  it("retries 400 near the end only through earlier times (no sleeping)", async () => {
+    const fetchMock = stubStatuses([400]);
+    const { backend, sleeps } = setup(52.21);
+    await backend.getFrame("abc", 52.209, { maxNotFoundRetries: 3 }).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("uses different next-step advice for 404 and for 400 near the end", async () => {
+    stubStatuses([404]);
+    const notFoundError = await setup()
+      .backend.getFrame("abc", 30)
+      .catch((e) => e);
+    expect(notFoundError.message).toContain("404");
+    expect(notFoundError.message).toMatch(/30.{0,20}60 seconds/);
+    expect(notFoundError.message).toContain("0.1");
+    expect(notFoundError.message).not.toMatch(/video track/i);
+
+    stubStatuses([400]);
+    const tailError = await setup(52.21)
+      .backend.getFrame("abc", 52.209)
+      .catch((e) => e);
+    expect(tailError.message).toContain("400");
+    expect(tailError.message).toMatch(/video track/i);
+    expect(tailError.message).toMatch(/earlier/i);
+    expect(tailError.message).not.toMatch(/60 seconds/);
+  });
+
+  it("keeps a plain message for other statuses", async () => {
+    stubStatuses([503]);
+    const error = await setup()
+      .backend.getFrame("abc", 30)
+      .catch((e) => e);
+    expect(error.message).toContain("503");
+    expect(error.message).not.toMatch(/video track|60 seconds/);
+  });
+});
+
+describe("CloudflareStreamBackend captions", () => {
+  type Captions = {
+    list?: (language?: string) => Promise<unknown>;
+    generate?: (language: string) => Promise<unknown>;
+  };
+
+  function captionStream(captions: Captions, extra: Handle = {}) {
+    return fakeStream({
+      details: async () => video(),
+      generateToken: async () => "SECRET",
+      captions,
+      ...extra,
+    } as unknown as Handle);
+  }
+
+  const backendFor = (captions: Captions, extra: Handle = {}) =>
+    new CloudflareStreamBackend(captionStream(captions, extra).stream, options);
+
+  it("lists captions as language + status, treating a missing status as ready", async () => {
+    const backend = backendFor({
+      list: async () => [
+        { language: "ja", label: "日本語", generated: true, status: "inprogress" },
+        { language: "en", label: "English", generated: true, status: "ready" },
+        { language: "fr", label: "Français", generated: false },
+        { language: "de", label: "Deutsch", generated: true, status: "error" },
+      ],
+    });
+    expect(await backend.getCaptions("abc")).toEqual([
+      { language: "ja", status: "inprogress" },
+      { language: "en", status: "ready" },
+      { language: "fr", status: "ready" },
+      { language: "de", status: "error" },
+    ]);
+  });
+
+  it("maps a missing video to VIDEO_NOT_FOUND when listing", async () => {
+    const backend = backendFor({
+      list: async () => {
+        throw namedError("NotFoundError");
+      },
+    });
+    await expect(backend.getCaptions("abc")).rejects.toMatchObject({ code: "VIDEO_NOT_FOUND" });
+  });
+
+  it("generates a caption for the given language", async () => {
+    const generate = vi.fn(async (_language: string) => ({ language: "ja" }));
+    await backendFor({ generate }).generateCaption("abc", "ja");
+    expect(generate).toHaveBeenCalledWith("ja");
+  });
+
+  it("treats an existing caption (BadRequestError) as success", async () => {
+    const backend = backendFor({
+      generate: async () => {
+        throw new Error(
+          "BadRequestError: There is an existing caption for this language, delete it first",
+        );
+      },
+    });
+    await expect(backend.generateCaption("abc", "ja")).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["StreamBindingError: Missing Audio: the video has no audio", "NO_AUDIO_TRACK", /no audio/i],
+    ["StreamBindingError: Language not supported: xx", "UNSUPPORTED_LANGUAGE", /ja, ko/],
+    ["BadRequestError: Language not supported: xx", "UNSUPPORTED_LANGUAGE", /en rather than en-US/],
+    ["BadRequestError: invalid language tag", "TRANSCRIPT_FAILED", /video_transcript again/],
+    ["NotFoundError: Not Found", "VIDEO_NOT_FOUND", /abc/],
+    ["InternalError: boom", "BACKEND_ERROR", /boom/],
+  ])("maps the generate error %s to %s", async (message, code, pattern) => {
+    const backend = backendFor({
+      generate: async () => {
+        throw new Error(message);
+      },
+    });
+    const promise = backend.generateCaption("abc", "ja");
+    await expect(promise).rejects.toMatchObject({ code });
+    await expect(promise).rejects.toThrow(pattern);
+  });
+
+  it("fetches the WebVTT body from <origin>/<token>/captions/<lang>", async () => {
+    const fetchMock = vi.fn(
+      async (_input: URL) =>
+        new Response("WEBVTT\n\n00:00.000 --> 00:01.000\nhi", {
+          status: 200,
+          headers: { "content-type": "text/vtt" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const text = await backendFor({}).getCaptionText("abc", "ja");
+    expect(text).toContain("WEBVTT");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://customer-abc123.cloudflarestream.com/SECRET/captions/ja",
+    );
+  });
+
+  it("reports a failed text fetch as TRANSCRIPT_FAILED without leaking the token", async () => {
+    vi.stubGlobal("fetch", async () => new Response("no", { status: 404 }));
+    const error = await backendFor({})
+      .getCaptionText("abc", "ja")
+      .catch((e) => e);
+    expect(error.code).toBe("TRANSCRIPT_FAILED");
+    expect(error.message).toContain("404");
+    expect(error.message).not.toContain("SECRET");
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("network down");
+    });
+    const network = await backendFor({})
+      .getCaptionText("abc", "ja")
+      .catch((e) => e);
+    expect(network.code).toBe("TRANSCRIPT_FAILED");
+    expect(network.message).not.toContain("SECRET");
+  });
+
+  it("keeps the token and URL out of caption text errors and logs, whatever the network error says", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const backend = backendFor({});
+    vi.stubGlobal("fetch", async (input: URL | string) => {
+      throw new TypeError(`failed to fetch ${String(input)} (token SECRET)`);
+    });
+    const error = await backend.getCaptionText("abc", "ja").catch((e) => e);
+    expect(error.code).toBe("TRANSCRIPT_FAILED");
+    expect(error.message).toContain("TypeError");
+    for (const leak of ["SECRET", "cloudflarestream.com", "captions/ja", "failed to fetch"]) {
+      expect(error.message).not.toContain(leak);
+    }
+    const harness = createHarness(backend);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await harness.callTool("video_transcript", { video_id: "abc", languages: ["ja"] });
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("SECRET");
+  });
+
+  it("disposes the captions stub and the list result", async () => {
+    const dispose = vi.fn();
+    const captionsStub = {
+      list: async () => {
+        const list = [{ language: "ja", label: "x", status: "ready" }];
+        Object.defineProperty(list, Symbol.dispose, { value: dispose });
+        return list;
+      },
+    };
+    const captionsDispose = vi.fn();
+    Object.defineProperty(captionsStub, Symbol.dispose, { value: captionsDispose });
+    await backendFor(captionsStub).getCaptions("abc");
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(captionsDispose).toHaveBeenCalledTimes(1);
   });
 });

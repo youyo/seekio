@@ -1,4 +1,4 @@
-import { SeekioError } from "../mcp/errors";
+import { messages, SeekioError } from "../mcp/errors";
 
 /** Stream thumbnails at exactly `duration` fall off the end; stay just inside. */
 const END_MARGIN_SECONDS = 0.001;
@@ -63,6 +63,30 @@ export function overviewTimestamps(duration: number, opts: OverviewOptions): num
   return normalize(timestamps, duration);
 }
 
+/**
+ * Number of frames `video_frames` requests for `[start, end]` at `fps`, before clamping to the
+ * video end and de-duplication: floor((end - start) * fps) + 1. `end` itself is included when it
+ * lies exactly on the `start + i / fps` grid.
+ */
+export function frameCount(start: number, end: number, fps: number): number {
+  // Floating point guard: (end - start) * fps may land just under an integer.
+  return Math.floor((end - start) * fps + EPSILON) + 1;
+}
+
+/** Largest `end` (millisecond precision, floored) for which `frameCount` stays within `maxFrames`. */
+export function maxEndForFrames(start: number, fps: number, maxFrames: number): number {
+  return floor3(start + (maxFrames - 1) / fps);
+}
+
+/**
+ * Highest `fps` (0.001 steps, floored) for which `[start, end]` yields at most `maxFrames`
+ * frames, or undefined when even 0.001 fps is too high.
+ */
+export function maxFpsForRange(start: number, end: number, maxFrames: number): number | undefined {
+  const fps = floor3((maxFrames - 1) / (end - start));
+  return fps > 0 ? fps : undefined;
+}
+
 export type FrameRange = {
   start: number;
   end: number;
@@ -102,15 +126,23 @@ export function frameTimestamps(range: FrameRange, limits: FrameLimits): number[
       `fps ${fps} exceeds the maximum of ${limits.maxFps}. Reduce fps.`,
     );
   }
-  // Floating point guard: (end - start) * fps may land just under an integer.
-  const frameCount = Math.floor((end - start) * fps + EPSILON) + 1;
-  if (frameCount > limits.maxFramesPerCall) {
+  const count = frameCount(start, end, fps);
+  if (count > limits.maxFramesPerCall) {
+    const max = limits.maxFramesPerCall;
     throw new SeekioError(
       "TOO_MANY_FRAMES",
-      `Requested ${frameCount} frames, but Seekio allows at most ${limits.maxFramesPerCall} frames per call. Narrow the interval or reduce fps.`,
+      messages.tooManyFrames({
+        requested: count,
+        start,
+        end,
+        fps,
+        maxFrames: max,
+        maxEnd: maxEndForFrames(start, fps, max),
+        maxFps: maxFpsForRange(start, end, max),
+      }),
     );
   }
-  const timestamps = Array.from({ length: frameCount }, (_, index) => start + index / fps).filter(
+  const timestamps = Array.from({ length: count }, (_, index) => start + index / fps).filter(
     (t) => t <= end + EPSILON,
   );
   return normalize(timestamps, duration);

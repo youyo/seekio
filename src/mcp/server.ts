@@ -13,6 +13,7 @@ import { registerFrames } from "./tools/frames";
 import { registerImportUrl } from "./tools/import-url";
 import { registerInfo } from "./tools/info";
 import { registerOverview } from "./tools/overview";
+import { registerTranscript } from "./tools/transcript";
 
 export const serverInfo = { name: "seekio", version: pkg.version } as const;
 
@@ -31,6 +32,9 @@ const BACKEND_ERROR_CODES = new Set<SeekioErrorCode>([
   "FRAME_FETCH_FAILED",
   "UPLOAD_CREATE_FAILED",
   "REGION_CROP_FAILED",
+  "NO_AUDIO_TRACK",
+  "UNSUPPORTED_LANGUAGE",
+  "TRANSCRIPT_FAILED",
 ]);
 
 type ToolResult = {
@@ -97,6 +101,7 @@ export function createSeekioServer(deps: ToolDeps): McpServer {
   registerOverview(server, deps);
   registerFrames(server, deps);
   registerFrame(server, deps);
+  registerTranscript(server, deps);
   registerDelete(server, deps);
   return server;
 }

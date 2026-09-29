@@ -40,7 +40,9 @@ export function registerFrame(server: McpServer, deps: ToolDeps): void {
         const info = await requireReady(deps, video_id);
         const timestamp = validateFrameAt(at, info.duration);
         if (region === undefined) {
-          const frame = await deps.backend.getFrame(video_id, timestamp);
+          const frame = await deps.backend.getFrame(video_id, timestamp, {
+            maxNotFoundRetries: deps.config.frameRetrySingleMax,
+          });
           log("frame.requested", {
             video_id,
             at: timestamp,
@@ -51,7 +53,10 @@ export function registerFrame(server: McpServer, deps: ToolDeps): void {
         }
         validateRegion(region);
         if (!deps.cropper) throw new SeekioError("REGION_UNAVAILABLE", messages.regionUnavailable);
-        const source = await deps.backend.getFrame(video_id, timestamp, { fullResolution: true });
+        const source = await deps.backend.getFrame(video_id, timestamp, {
+          fullResolution: true,
+          maxNotFoundRetries: deps.config.frameRetrySingleMax,
+        });
         const cropped = await deps.cropper
           .crop(source, region as Region, maxLongEdge)
           .catch((e) => {

@@ -1,5 +1,7 @@
 import { messages, SeekioError } from "../mcp/errors";
 import type {
+  Caption,
+  CaptionStatus,
   CreateUploadInput,
   Frame,
   FrameOptions,
@@ -18,6 +20,10 @@ export type CloudflareStreamOptions = {
   maxVideoDurationSeconds: number;
   /** Clock in epoch milliseconds. Defaults to `Date.now`; tests inject a fixed one. */
   now?: () => number;
+  /** Waits for `ms` milliseconds (404 backoff). Defaults to a real timer; tests inject a fake. */
+  sleep?: (ms: number) => Promise<void>;
+  /** First 404 backoff in milliseconds (doubles per retry). Default 1000. */
+  frameRetryBaseDelayMs?: number;
 };
 
 /**
@@ -92,8 +98,40 @@ function importError(error: unknown): SeekioError {
   }
 }
 
+/** Error class name only: fetch error messages can contain the request URL (with the signed token). */
+function errorKind(error: unknown): string {
+  return error instanceof Error && /^\w+$/.test(error.name) ? error.name : "network error";
+}
+
+function generateCaptionError(error: unknown, videoId: string, language: string): SeekioError {
+  const name = streamErrorName(error);
+  const detail = error instanceof Error ? error.message : String(error);
+  if (name === "NotFoundError") {
+    return new SeekioError("VIDEO_NOT_FOUND", messages.notFound(videoId));
+  }
+  if (/Missing Audio/i.test(detail))
+    return new SeekioError("NO_AUDIO_TRACK", messages.noAudioTrack);
+  if (/Language not supported/i.test(detail)) {
+    return new SeekioError("UNSUPPORTED_LANGUAGE", messages.unsupportedLanguage(language));
+  }
+  if (name === "BadRequestError") {
+    // Fixed text: the provider message is not echoed.
+    return new SeekioError(
+      "TRANSCRIPT_FAILED",
+      messages.transcriptFailed(language, "Cloudflare Stream rejected the request"),
+    );
+  }
+  return backendError(error, `generate captions for video ${videoId}`);
+}
+
 /** Only frames this close to the end are retried earlier on HTTP 4xx (Stream rejects some times at the very end). */
 const END_RETRY_WINDOW_SECONDS = 1;
+/** Frames this close to the end that fail with HTTP 400 get the "video track ended early" advice. */
+const END_HINT_WINDOW_SECONDS = 5;
+const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /** How far before the requested time each retry goes. */
 const RETRY_OFFSETS_SECONDS = [0.1, 0.5, 1.0];
 
@@ -255,10 +293,22 @@ export class CloudflareStreamBackend implements VideoBackend {
   async getFrame(videoId: string, timestamp: number, options?: FrameOptions): Promise<Frame> {
     const source = await this.thumbnailSource(videoId);
     const height = options?.fullResolution ? source.fullHeight : source.height;
-    const first = await this.fetchThumbnail(source, timestamp, height);
+    // Stream thumbnails can answer 404 intermittently for a while after the video is ready:
+    // retry the same time with backoff first.
+    const maxRetries = Math.max(0, options?.maxNotFoundRetries ?? 0);
+    const baseDelay = this.options.frameRetryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
+    const sleep = this.options.sleep ?? defaultSleep;
+    let first = await this.fetchThumbnail(source, timestamp, height);
+    for (let retry = 0; !first.ok && first.status === 404 && retry < maxRetries; retry++) {
+      await sleep(baseDelay * 2 ** retry);
+      first = await this.fetchThumbnail(source, timestamp, height);
+    }
     if (first.ok) return first.frame;
-    const nearEnd = source.duration - timestamp <= END_RETRY_WINDOW_SECONDS;
-    if (nearEnd && first.status >= 400 && first.status < 500) {
+    const remaining = source.duration - timestamp;
+    const nearEnd = remaining <= END_RETRY_WINDOW_SECONDS;
+    // Multi-frame tools skip the step-back to bound the subrequest count (retryEarlier: false).
+    if (options?.retryEarlier !== false && nearEnd && first.status >= 400 && first.status < 500) {
+      // Each earlier time gets a single attempt: this bounds the request count per frame.
       for (const earlier of retryTimestamps(timestamp)) {
         const retry = await this.fetchThumbnail(source, earlier, height);
         if (retry.ok) return retry.frame;
@@ -266,8 +316,67 @@ export class CloudflareStreamBackend implements VideoBackend {
     }
     throw new SeekioError(
       "FRAME_FETCH_FAILED",
-      `Cloudflare Stream returned HTTP ${first.status} for the frame at ${timestamp}s.`,
+      messages.frameFetchFailed({
+        status: first.status,
+        timestamp,
+        nearEnd: remaining <= END_HINT_WINDOW_SECONDS,
+      }),
     );
+  }
+
+  async getCaptions(videoId: string): Promise<Caption[]> {
+    try {
+      return await this.withCaptions(videoId, async (captions) => {
+        const list = await captions.list();
+        try {
+          return list.map((c) => ({
+            language: c.language,
+            status: c.status ?? ("ready" as CaptionStatus),
+          }));
+        } finally {
+          disposeStub(list);
+        }
+      });
+    } catch (error) {
+      if (isNotFound(error)) throw new SeekioError("VIDEO_NOT_FOUND", messages.notFound(videoId));
+      throw backendError(error, `list captions of video ${videoId}`);
+    }
+  }
+
+  async generateCaption(videoId: string, language: string): Promise<void> {
+    try {
+      await this.withCaptions(videoId, async (captions) => {
+        disposeStub(await captions.generate(language));
+      });
+    } catch (error) {
+      // Generating twice for one language is not a failure: the caller looks at the track's status.
+      if (error instanceof Error && /existing caption/i.test(error.message)) return;
+      throw generateCaptionError(error, videoId, language);
+    }
+  }
+
+  async getCaptionText(videoId: string, language: string): Promise<string> {
+    const source = await this.thumbnailSource(videoId);
+    const url = `${source.base}/captions/${encodeURIComponent(language)}`;
+    let response: Response;
+    try {
+      response = await fetch(url);
+    } catch (error) {
+      throw new SeekioError(
+        "TRANSCRIPT_FAILED",
+        messages.transcriptFailed(
+          language,
+          `could not reach Cloudflare Stream (${errorKind(error)})`,
+        ),
+      );
+    }
+    if (!response.ok) {
+      throw new SeekioError(
+        "TRANSCRIPT_FAILED",
+        messages.transcriptFailed(language, `Cloudflare Stream returned HTTP ${response.status}`),
+      );
+    }
+    return response.text();
   }
 
   private async fetchThumbnail(
@@ -285,7 +394,7 @@ export class CloudflareStreamBackend implements VideoBackend {
     } catch (error) {
       throw new SeekioError(
         "FRAME_FETCH_FAILED",
-        `Could not reach Cloudflare Stream for the frame at ${timestamp}s: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not reach Cloudflare Stream for the frame at ${timestamp}s (${errorKind(error)}). Try the same call again.`,
       );
     }
     if (!response.ok) return { ok: false, status: response.status };
@@ -362,6 +471,21 @@ export class CloudflareStreamBackend implements VideoBackend {
     } finally {
       disposeStub(handle);
     }
+  }
+
+  /** Borrows the captions API of a video for one operation and always disposes it afterwards. */
+  private withCaptions<T>(
+    videoId: string,
+    fn: (captions: StreamScopedCaptions) => Promise<T>,
+  ): Promise<T> {
+    return this.withVideo(videoId, async (handle) => {
+      const captions = handle.captions;
+      try {
+        return await fn(captions);
+      } finally {
+        disposeStub(captions);
+      }
+    });
   }
 
   private async details(videoId: string): Promise<VideoDetails> {

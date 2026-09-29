@@ -6,6 +6,8 @@
  *   SEEKIO_AUTH_TOKEN=... CF_ACCESS_CLIENT_ID=... CF_ACCESS_CLIENT_SECRET=... \
  *   mise run test:integration
  *
+ * Set SEEKIO_FIXTURE_SPEECH_VIDEO (a video with speech) and SEEKIO_FIXTURE_SPEECH_LANGUAGES (for
+ * example `ja,en`) to also run the video_transcript scenario.
  * Set SEEKIO_FIXTURE_VIDEO_URL (a public direct video file URL) to also run the video_import_url scenario.
  * Cloudflare Stream rejects a URL it has already imported (URL_ALREADY_IMPORTED), so the scenario
  * cannot be re-run with the same URL while the earlier video exists; the test deletes its video
@@ -20,6 +22,11 @@ import { McpHttpClient, type ToolResult } from "./mcp-client";
 const MCP_URL = process.env.SEEKIO_MCP_URL;
 const FIXTURE = process.env.SEEKIO_FIXTURE_VIDEO;
 const FIXTURE_URL = process.env.SEEKIO_FIXTURE_VIDEO_URL;
+const SPEECH_FIXTURE = process.env.SEEKIO_FIXTURE_SPEECH_VIDEO;
+const SPEECH_LANGUAGES = (process.env.SEEKIO_FIXTURE_SPEECH_LANGUAGES ?? "")
+  .split(",")
+  .map((language) => language.trim())
+  .filter((language) => language !== "");
 const READY_TIMEOUT_MS = 5 * 60 * 1000;
 const WAIT_SECONDS = 25;
 const execFileAsync = promisify(execFile);
@@ -97,7 +104,7 @@ describeIf("Seekio against real Cloudflare Stream", () => {
       const client = new McpHttpClient({ url: MCP_URL as string, headers: authHeaders() });
       const init = await client.initialize();
       expect(init.serverInfo.name).toBe("seekio");
-      expect((await client.listTools()).tools).toHaveLength(7);
+      expect((await client.listTools()).tools).toHaveLength(8);
 
       const upload = json<{ video_id: string; upload_url: string; upload_command: string }>(
         await client.callTool("video_create_upload", { filename: basename(FIXTURE as string) }),
@@ -109,7 +116,8 @@ describeIf("Seekio against real Cloudflare Stream", () => {
         escapeUploadPath(resolve(FIXTURE as string)),
       );
       const { stdout } = await execFileAsync("sh", ["-c", command]);
-      expect(stdout).toBeTypeOf("string");
+      // Whatever curl printed for the response body, the last line names the uploaded video.
+      expect(stdout.trimEnd().split("\n").at(-1)).toBe(`uploaded video_id=${upload.video_id}`);
 
       const info = await waitUntilReady(client, upload.video_id);
       expect(info.ready).toBe(true);
@@ -214,3 +222,65 @@ if (!MCP_URL || !FIXTURE) {
     "integration: set SEEKIO_MCP_URL and SEEKIO_FIXTURE_VIDEO to run the real Stream scenario",
   );
 }
+
+const describeSpeechIf =
+  MCP_URL && SPEECH_FIXTURE && SPEECH_LANGUAGES.length > 0 ? describe : describe.skip;
+
+describeSpeechIf("Seekio video_transcript against real Cloudflare Stream", () => {
+  it(
+    "uploads a video with speech, transcribes it in each language, and deletes it",
+    async () => {
+      const client = new McpHttpClient({ url: MCP_URL as string, headers: authHeaders() });
+      await client.initialize();
+
+      const upload = json<{ video_id: string; upload_command: string }>(
+        await client.callTool("video_create_upload", {
+          filename: basename(SPEECH_FIXTURE as string),
+        }),
+      );
+      const command = upload.upload_command.replace("<PATH>", () =>
+        escapeUploadPath(resolve(SPEECH_FIXTURE as string)),
+      );
+      await execFileAsync("sh", ["-c", command]);
+
+      try {
+        const info = await waitUntilReady(client, upload.video_id);
+        expect(info.ready).toBe(true);
+        const duration = info.duration as number;
+
+        type Transcript = {
+          language: string;
+          status: string;
+          cues?: Array<{ start: number; end: number; text: string }>;
+        };
+        let transcripts: Transcript[] = [];
+        const deadline = Date.now() + READY_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+          const result = await client.callTool("video_transcript", {
+            video_id: upload.video_id,
+            languages: SPEECH_LANGUAGES,
+            wait_seconds: WAIT_SECONDS,
+          });
+          expect(result.isError).toBeUndefined();
+          transcripts = json<{ transcripts: Transcript[] }>(result).transcripts;
+          if (transcripts.every((t) => t.status !== "inprogress")) break;
+        }
+
+        expect(transcripts.map((t) => t.language)).toEqual(SPEECH_LANGUAGES);
+        for (const transcript of transcripts) {
+          expect(transcript.status).toBe("ready");
+          expect(transcript.cues?.length ?? 0).toBeGreaterThan(0);
+          for (const cue of transcript.cues ?? []) {
+            expect(cue.start).toBeGreaterThanOrEqual(0);
+            expect(cue.end).toBeGreaterThan(cue.start);
+            expect(cue.end).toBeLessThanOrEqual(duration);
+            expect(cue.text.length).toBeGreaterThan(0);
+          }
+        }
+      } finally {
+        await client.callTool("video_delete", { video_id: upload.video_id });
+      }
+    },
+    10 * 60 * 1000,
+  );
+});

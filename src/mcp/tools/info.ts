@@ -30,7 +30,7 @@ export function registerInfo(server: McpServer, deps: ToolDeps): void {
     "video_info",
     {
       title: "Video info",
-      description: `Get encoding status, duration, dimensions, encoding progress (pct_complete), and delete_after (when the video will be deleted automatically, about ${deps.config.videoRetentionHours} hours after creation; the cleanup runs hourly, so up to about an hour later; call video_delete when done to remove it immediately) of a video. Frame tools only work when ready is true. If the video is still processing, pass wait_seconds (up to ${maxWait}) to wait for it to finish in a single call instead of calling repeatedly; it returns as soon as the video is ready or has failed, or the current status when the time is up.`,
+      description: `Get encoding status, duration, dimensions, encoding progress (pct_complete), and delete_after (when the video will be deleted automatically, about ${deps.config.videoRetentionHours} hours after creation; the cleanup runs hourly, so up to about an hour later; call video_delete when done to remove it immediately) of a video. Frame tools only work when ready is true (the video can be played and thumbnails can be taken). pct_complete is the progress of encoding every quality level and can still be below 100 when ready is already true; do not wait for it to reach 100. If the video is still processing, pass wait_seconds (up to ${maxWait}) to wait for it to finish in a single call instead of calling repeatedly; it returns as soon as the video is ready or has failed, or the current status when the time is up.`,
       inputSchema: z.object({
         video_id: videoIdSchema,
         wait_seconds: z

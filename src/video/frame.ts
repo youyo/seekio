@@ -1,5 +1,5 @@
 import { isSeekioError, SeekioError } from "../mcp/errors";
-import type { Frame, VideoBackend } from "./backend";
+import type { Frame, FrameOptions, VideoBackend } from "./backend";
 
 /** Fetches frames for `timestamps` with at most `concurrency` in flight; result order matches input order. */
 export async function fetchFramesBounded(
@@ -7,6 +7,7 @@ export async function fetchFramesBounded(
   videoId: string,
   timestamps: readonly number[],
   concurrency: number,
+  options?: FrameOptions,
 ): Promise<Frame[]> {
   const frames: Frame[] = new Array(timestamps.length);
   let next = 0;
@@ -15,7 +16,7 @@ export async function fetchFramesBounded(
       const index = next++;
       const timestamp = timestamps[index] as number;
       try {
-        frames[index] = await backend.getFrame(videoId, timestamp);
+        frames[index] = await backend.getFrame(videoId, timestamp, options);
       } catch (error) {
         if (isSeekioError(error)) throw error;
         throw new SeekioError(

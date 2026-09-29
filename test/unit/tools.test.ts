@@ -12,6 +12,7 @@ const TOOL_NAMES = [
   "video_overview",
   "video_frames",
   "video_frame",
+  "video_transcript",
   "video_delete",
 ];
 const FAKE_JPEG_BASE64 = Buffer.from(FAKE_JPEG).toString("base64");
@@ -27,7 +28,7 @@ beforeEach(() => {
 });
 
 describe("tools/list", () => {
-  it("exposes exactly the seven tools with descriptions", async () => {
+  it("exposes exactly the eight tools with descriptions", async () => {
     const { tools } = await harness.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
     for (const tool of tools) expect(tool.description).toBeTruthy();
@@ -42,7 +43,7 @@ describe("video_create_upload", () => {
       video_id: "fake-1",
       upload_url: "https://upload.example/fake-1",
       upload_command:
-        "curl -sS --fail-with-body -X POST -F 'file=@\"<PATH>\"' 'https://upload.example/fake-1'",
+        "curl -sS --fail-with-body -X POST -F 'file=@\"<PATH>\"' 'https://upload.example/fake-1' && printf '\\n%s\\n' 'uploaded video_id=fake-1'",
       expires_at: "2026-01-01T00:15:00.000Z",
       max_duration_seconds: defaults.maxVideoDurationSeconds,
       max_upload_bytes: defaults.maxUploadBytes,
@@ -82,6 +83,22 @@ describe("video_create_upload", () => {
     expect(desc).toContain("backslash");
     expect(desc).toContain("wait_seconds");
     expect(desc).not.toContain("poll video_info");
+    expect(desc).toContain("uploaded video_id=");
+  });
+
+  it("prints a final 'uploaded video_id=<id>' line only when curl succeeds, and quotes the id", async () => {
+    const result = await harness.callTool("video_create_upload", {});
+    const { upload_command } = jsonOf<{ upload_command: string }>(result);
+    expect(upload_command).toContain("&& printf '\\n%s\\n' 'uploaded video_id=fake-1'");
+    expect(upload_command).not.toContain("/dev/null");
+    expect(upload_command).not.toMatch(/\|\|/);
+  });
+
+  it("shell-quotes a video_id that contains a single quote", async () => {
+    backend.videoIdOverride = "a'b";
+    const result = await harness.callTool("video_create_upload", {});
+    const { upload_command } = jsonOf<{ upload_command: string }>(result);
+    expect(upload_command).toContain("'uploaded video_id=a'\\''b'");
   });
 
   it("rejects max_duration_seconds above the server limit", async () => {
@@ -400,6 +417,14 @@ describe("video_overview", () => {
 });
 
 describe("video_frames", () => {
+  it("documents how the frame count is computed in the description", async () => {
+    const { tools } = await harness.listTools();
+    const desc = tools.find((t) => t.name === "video_frames")?.description ?? "";
+    expect(desc).toContain("floor((end - start) * fps) + 1");
+    expect(desc).toContain("end is included");
+    expect(desc).toContain("clamped");
+  });
+
   it("uses the default fps and returns deterministic timestamps", async () => {
     backend.addVideo({ id: "v", duration: 10 });
     const result = await harness.callTool("video_frames", { video_id: "v", start: 3, end: 3.4 });
@@ -421,7 +446,7 @@ describe("video_frames", () => {
     });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toBe(
-      "[TOO_MANY_FRAMES] Requested 16 frames, but Seekio allows at most 15 frames per call. Narrow the interval or reduce fps.",
+      "[TOO_MANY_FRAMES] Requested 16 frames (start 0s, end 1.5s, fps 10), but Seekio allows at most 15 frames per call. The frame count is floor((end - start) * fps) + 1. With start 0 and fps 10, end can be at most 1.4s. To keep end at 1.5s, lower fps to 9.333 or less. Or narrow the range.",
     );
     expect(backend.calls.filter((c) => c.op === "getFrame")).toHaveLength(0);
   });
@@ -614,5 +639,48 @@ describe("unexpected failures", () => {
     const result = await harness.callTool("video_info", { video_id: "v" });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toBe("[BACKEND_ERROR] Unexpected error: boom");
+  });
+});
+
+describe("404 retry budget per tool", () => {
+  beforeEach(() => backend.addVideo({ id: "v", duration: 10 }));
+
+  it("video_frame allows the single-frame budget, with and without region", async () => {
+    await harness.callTool("video_frame", { video_id: "v", at: 3 });
+    expect(backend.frameRetryBudgets).toEqual([defaults.frameRetrySingleMax]);
+    const cropHarness = createHarness(backend, { cropper: new FakeImageCropper() });
+    backend.frameRetryBudgets.length = 0;
+    await cropHarness.callTool("video_frame", {
+      video_id: "v",
+      at: 3,
+      region: { x: 0, y: 0, width: 1, height: 0.5 },
+    });
+    expect(backend.frameRetryBudgets).toEqual([defaults.frameRetrySingleMax]);
+  });
+
+  it("only video_frame may step back to earlier times near the end", async () => {
+    await harness.callTool("video_frame", { video_id: "v", at: 3 });
+    expect(backend.frameRetryEarlier).toEqual([undefined]);
+    backend.frameRetryEarlier.length = 0;
+    await harness.callTool("video_frames", { video_id: "v", start: 0, end: 2, fps: 1 });
+    await harness.callTool("video_overview", { video_id: "v", max_frames: 3 });
+    expect(backend.frameRetryEarlier).toEqual([false, false, false, false, false, false]);
+  });
+
+  it("video_frames and video_overview allow the multi-frame budget per frame", async () => {
+    await harness.callTool("video_frames", { video_id: "v", start: 0, end: 2, fps: 1 });
+    expect(backend.frameRetryBudgets).toEqual([1, 1, 1].map(() => defaults.frameRetryMultiMax));
+    backend.frameRetryBudgets.length = 0;
+    await harness.callTool("video_overview", { video_id: "v", max_frames: 4 });
+    expect(backend.frameRetryBudgets).toEqual([1, 1, 1, 1].map(() => defaults.frameRetryMultiMax));
+  });
+});
+
+describe("video_info readiness wording", () => {
+  it("explains ready versus pct_complete", async () => {
+    const { tools } = await harness.listTools();
+    const desc = tools.find((t) => t.name === "video_info")?.description ?? "";
+    expect(desc).toMatch(/ready/);
+    expect(desc).toMatch(/pct_complete.*(below|less than|under) 100|100.*pct_complete/i);
   });
 });

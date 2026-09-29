@@ -49,6 +49,7 @@ export function registerOverview(server: McpServer, deps: ToolDeps): void {
           video_id,
           timestamps,
           deps.config.frameFetchConcurrency,
+          { maxNotFoundRetries: deps.config.frameRetryMultiMax, retryEarlier: false },
         );
         log("overview.requested", {
           video_id,
