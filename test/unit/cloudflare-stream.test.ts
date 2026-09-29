@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudflareStreamBackend } from "../../src/video/cloudflare-stream";
 import { createHarness } from "./mcp-harness";
 
-const options = { frameHeight: 1080, uploadUrlTtlSeconds: 900, maxVideoDurationSeconds: 300 };
+const options = { frameHeight: 720, uploadUrlTtlSeconds: 900, maxVideoDurationSeconds: 300 };
 
 function notFound(): Error {
   const error = new Error("video not found");
@@ -268,8 +268,30 @@ describe("CloudflareStreamBackend", () => {
     expect(generateToken).toHaveBeenCalledTimes(1);
     const url = String(fetchMock.mock.calls[0]?.[0]);
     expect(url).toBe(
-      "https://customer-abc123.cloudflarestream.com/TOKEN/thumbnails/thumbnail.jpg?time=3.347s&height=1080&fit=scale",
+      "https://customer-abc123.cloudflarestream.com/TOKEN/thumbnails/thumbnail.jpg?time=3.347s&height=720&fit=scale",
     );
+  });
+
+  it("never upscales: uses min(source height, frameHeight)", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (input: URL) => {
+      urls.push(String(input));
+      return new Response(new Uint8Array([0xff]), { status: 200 });
+    });
+    const heightOf = async (height: number | undefined) => {
+      const input = height === undefined ? { width: -1, height: -1 } : { width: 100, height };
+      const { stream } = fakeStream({
+        details: async () => video({ input } as Partial<StreamVideo>),
+        generateToken: async () => "T",
+      });
+      await new CloudflareStreamBackend(stream, options).getFrame("abc", 1);
+      return new URL(urls.at(-1) as string).searchParams.get("height");
+    };
+    expect(await heightOf(360)).toBe("360");
+    expect(await heightOf(480)).toBe("480");
+    expect(await heightOf(720)).toBe("720");
+    expect(await heightOf(2556)).toBe("720");
+    expect(await heightOf(undefined)).toBe("720");
   });
 
   it("reports non-200 thumbnail responses as FRAME_FETCH_FAILED without leaking the token", async () => {
@@ -284,6 +306,64 @@ describe("CloudflareStreamBackend", () => {
     expect(error.code).toBe("FRAME_FETCH_FAILED");
     expect(error.message).toContain("404");
     expect(error.message).not.toContain("SECRET");
+  });
+
+  describe("frames near the end of the video", () => {
+    function endStream(duration = 52.21) {
+      return fakeStream({
+        details: async () => video({ duration }),
+        generateToken: async () => "SECRET",
+      });
+    }
+    const timeOf = (input: URL) => new URL(input).searchParams.get("time");
+
+    it("retries slightly earlier on HTTP 4xx and reports the time actually fetched", async () => {
+      const seen: (string | null)[] = [];
+      vi.stubGlobal("fetch", async (input: URL) => {
+        seen.push(timeOf(input));
+        return seen.length < 3
+          ? new Response("bad", { status: 400 })
+          : new Response(new Uint8Array([0xff]), { status: 200 });
+      });
+      const frame = await new CloudflareStreamBackend(endStream().stream, options).getFrame(
+        "abc",
+        52.209,
+      );
+      expect(seen).toEqual(["52.209s", "52.109s", "51.709s"]);
+      expect(frame.timestamp).toBe(51.709);
+    });
+
+    it("gives up with FRAME_FETCH_FAILED after all fallbacks fail", async () => {
+      const fetchMock = vi.fn(async (_input: URL) => new Response("bad", { status: 400 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const error = await new CloudflareStreamBackend(endStream().stream, options)
+        .getFrame("abc", 52.209)
+        .catch((e) => e);
+      expect(error.code).toBe("FRAME_FETCH_FAILED");
+      expect(error.message).toContain("400");
+      expect(error.message).not.toContain("SECRET");
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    });
+
+    it("does not retry away from the end, on 5xx, or below 0", async () => {
+      const fetchMock = vi.fn(async (_input: URL) => new Response("bad", { status: 400 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const backend = new CloudflareStreamBackend(endStream().stream, options);
+      await backend.getFrame("abc", 30).catch(() => {});
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      fetchMock.mockClear();
+      fetchMock.mockImplementation(async () => new Response("bad", { status: 503 }));
+      await backend.getFrame("abc", 52.209).catch(() => {});
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // very short video: candidates are clamped at 0 and never negative
+      fetchMock.mockClear();
+      fetchMock.mockImplementation(async () => new Response("bad", { status: 400 }));
+      const short = new CloudflareStreamBackend(endStream(0.5).stream, options);
+      await short.getFrame("abc", 0.3).catch(() => {});
+      const times = fetchMock.mock.calls.map((c) => Number.parseFloat(timeOf(c[0]) as string));
+      expect(times.every((t) => t >= 0)).toBe(true);
+      expect(new Set(times).size).toBe(times.length);
+    });
   });
 
   it("treats deleting a missing video as success", async () => {

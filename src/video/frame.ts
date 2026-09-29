@@ -30,7 +30,14 @@ export async function fetchFramesBounded(
     worker,
   );
   await Promise.all(workers);
-  return frames;
+  // A backend may fall back to an earlier time near the end of the video, which can collide with
+  // another requested frame; keep the first frame per actual timestamp.
+  const seen = new Set<number>();
+  return frames.filter((frame) => {
+    if (seen.has(frame.timestamp)) return false;
+    seen.add(frame.timestamp);
+    return true;
+  });
 }
 
 export type ImageContent = { type: "image"; data: string; mimeType: "image/jpeg" };

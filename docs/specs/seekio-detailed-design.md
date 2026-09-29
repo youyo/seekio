@@ -386,7 +386,7 @@ Cloudflare Stream の on-demand thumbnail を使う。
 概念:
 
 ``` text
-.../thumbnails/thumbnail.jpg?time=3.347s&height=1080&fit=scale
+.../thumbnails/thumbnail.jpg?time=3.347s&height=720&fit=scale
 ```
 
 Seekio が JPEG を fetch し、MCP `image` content として返す。
@@ -394,7 +394,7 @@ Seekio が JPEG を fetch し、MCP `image` content として返す。
 デフォルト:
 
 ``` text
-FRAME_HEIGHT = 1080
+FRAME_HEIGHT = 720（ソース動画の高さがこれ未満ならソース高さ。アップスケールしない）
 ```
 
 Stream video は原則 `requireSignedURLs = true` で作成する。frame fetch
@@ -771,7 +771,7 @@ export const defaults = {
   defaultFramesFps: 5,
   maxFps: 30,
   overviewMaxFrames: 12,
-  frameHeight: 1080,
+  frameHeight: 720,
   frameFetchConcurrency: 6,
 } as const;
 ```

@@ -33,6 +33,11 @@ describe("overviewTimestamps", () => {
     expect(ts).toEqual([0, 0.001]);
   });
 
+  it("floors instead of rounding, without losing exact millisecond values to float noise", () => {
+    expect(overviewTimestamps(10, { maxFrames: 4 })).toEqual([0, 3.333, 6.666, 9.999]);
+    expect(overviewTimestamps(52.21, { maxFrames: 2 })).toEqual([0, 52.209]);
+  });
+
   it("returns [0] for a single frame", () => {
     expect(overviewTimestamps(30, { maxFrames: 1 })).toEqual([0]);
   });
@@ -58,6 +63,11 @@ describe("frameTimestamps", () => {
   it("computes start + index / fps without accumulating floating point error", () => {
     const ts = frameTimestamps({ start: 3.2, end: 3.6, fps: 20, duration: 10 }, limits);
     expect(ts).toEqual([3.2, 3.25, 3.3, 3.35, 3.4, 3.45, 3.5, 3.55, 3.6]);
+  });
+
+  it("floors to milliseconds so Stream's next-frame-at-or-after lookup does not skip a frame", () => {
+    const ts = frameTimestamps({ start: 10, end: 10.1, fps: 30, duration: 60 }, limits);
+    expect(ts).toEqual([10, 10.033, 10.066, 10.1]);
   });
 
   it("uses the default fps of 5", () => {
@@ -123,11 +133,12 @@ describe("validateFrameAt", () => {
     expect(validateFrameAt(3.3474, 10)).toBe(3.347);
     expect(validateFrameAt(0, 10)).toBe(0);
     expect(validateFrameAt(9.9994, 10)).toBe(9.999);
+    expect(validateFrameAt(10.0667, 60)).toBe(10.066);
+    expect(validateFrameAt(10.1, 60)).toBe(10.1);
   });
 
   it("rejects timestamps outside [0, duration)", () => {
     expect(codeOf(() => validateFrameAt(10, 10))).toBe("INVALID_TIMESTAMP");
-    expect(codeOf(() => validateFrameAt(9.9996, 10))).toBe("INVALID_TIMESTAMP");
     expect(codeOf(() => validateFrameAt(-0.1, 10))).toBe("INVALID_TIMESTAMP");
     expect(codeOf(() => validateFrameAt(1, 0))).toBe("VIDEO_NOT_READY");
   });

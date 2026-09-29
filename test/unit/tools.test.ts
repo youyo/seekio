@@ -192,6 +192,23 @@ describe("video_overview", () => {
     ]);
   });
 
+  it("labels frames with the timestamp the backend actually returned", async () => {
+    backend.addVideo({ id: "v", duration: 10 });
+    const original = backend.getFrame.bind(backend);
+    backend.getFrame = async (videoId, timestamp) => {
+      const frame = await original(videoId, timestamp);
+      return timestamp > 9 ? { ...frame, timestamp: 9.5 } : frame;
+    };
+    const result = await harness.callTool("video_overview", { video_id: "v", max_frames: 3 });
+    expect(result.isError).toBeUndefined();
+    const texts = result.content
+      .filter((c) => c.type === "text")
+      .map((c) => (c as { text: string }).text);
+    expect(texts).toContain("Frame at 9.5s");
+    expect(texts).not.toContain("Frame at 9.999s");
+    expect(texts[0]).toContain("0s, 5s, 9.5s");
+  });
+
   it("caps max_frames at the per-call limit with a TOO_MANY_FRAMES result", async () => {
     backend.addVideo({ id: "v", duration: 120 });
     const result = await harness.callTool("video_overview", { video_id: "v", max_frames: 31 });

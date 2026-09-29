@@ -60,7 +60,7 @@ export function registerOverview(server: McpServer, deps: ToolDeps): void {
           content: [
             {
               type: "text",
-              text: `Overview of video ${video_id} (${info.duration}s): ${frames.length} frames at ${timestamps.map((t) => `${t}s`).join(", ")}`,
+              text: `Overview of video ${video_id} (${info.duration}s): ${frames.length} frames at ${frames.map((f) => `${f.timestamp}s`).join(", ")}`,
             },
             ...frames.flatMap((frame) => [
               frameTextContent(frame.timestamp),

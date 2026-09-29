@@ -5,8 +5,15 @@ const END_MARGIN_SECONDS = 0.001;
 /** Absorbs binary floating point noise when comparing derived timestamps. */
 const EPSILON = 1e-9;
 
-function round3(value: number): number {
-  return Math.round(value * 1000) / 1000;
+/** Guards `x * 1000` landing just under an integer (e.g. 10.1 * 1000 = 10099.999...). */
+const MS_EPSILON = 1e-6;
+
+/**
+ * Floors to milliseconds. Stream returns the first frame at or after the requested time, so
+ * rounding up can skip a frame (10.0667 -> 10.067 lands one frame late at 30fps).
+ */
+function floor3(value: number): number {
+  return Math.floor(value * 1000 + MS_EPSILON) / 1000;
 }
 
 function clampToVideo(timestamp: number, duration: number): number {
@@ -14,8 +21,8 @@ function clampToVideo(timestamp: number, duration: number): number {
 }
 
 function normalize(timestamps: number[], duration: number): number[] {
-  const rounded = timestamps.map((t) => round3(clampToVideo(t, duration)));
-  return [...new Set(rounded)].sort((a, b) => a - b);
+  const floored = timestamps.map((t) => floor3(clampToVideo(t, duration)));
+  return [...new Set(floored)].sort((a, b) => a - b);
 }
 
 export type OverviewOptions = {
@@ -109,12 +116,12 @@ export function frameTimestamps(range: FrameRange, limits: FrameLimits): number[
   return normalize(timestamps, duration);
 }
 
-/** Validates a single timestamp for `video_frame` and returns it rounded to milliseconds. */
+/** Validates a single timestamp for `video_frame` and returns it floored to milliseconds. */
 export function validateFrameAt(at: number, duration: number): number {
   if (!(duration > 0)) {
     throw new SeekioError("VIDEO_NOT_READY", "Video duration is unknown. Call video_info first.");
   }
-  const rounded = round3(at);
+  const rounded = floor3(at);
   if (!(rounded >= 0) || rounded >= duration) {
     throw new SeekioError(
       "INVALID_TIMESTAMP",

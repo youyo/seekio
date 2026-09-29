@@ -77,6 +77,21 @@ function importError(error: unknown): SeekioError {
   }
 }
 
+/** Only frames this close to the end are retried earlier on HTTP 4xx (Stream rejects some times at the very end). */
+const END_RETRY_WINDOW_SECONDS = 1;
+/** How far before the requested time each retry goes. */
+const RETRY_OFFSETS_SECONDS = [0.1, 0.5, 1.0];
+
+/** Fallback times strictly before `timestamp`, in ms precision, never below 0, without duplicates. */
+function retryTimestamps(timestamp: number): number[] {
+  const candidates = RETRY_OFFSETS_SECONDS.map((offset) =>
+    Math.max(0, Math.round((timestamp - offset) * 1000) / 1000),
+  );
+  return [...new Set(candidates)].filter((t) => t < timestamp);
+}
+
+type ThumbnailSource = { base: string; height: number; duration: number };
+
 function backendError(error: unknown, action: string): SeekioError {
   const detail = error instanceof Error ? error.message : String(error);
   return new SeekioError("BACKEND_ERROR", `Cloudflare Stream failed to ${action}: ${detail}`);
@@ -87,7 +102,7 @@ export class CloudflareStreamBackend implements VideoBackend {
   private readonly stream: StreamBinding;
   private readonly options: CloudflareStreamOptions;
   /** Per-video signed thumbnail base (`<origin>/<token>`), memoized for the life of this instance. */
-  private readonly thumbnailBases = new Map<string, Promise<string>>();
+  private readonly thumbnailSources = new Map<string, Promise<ThumbnailSource>>();
 
   constructor(stream: StreamBinding, options: CloudflareStreamOptions) {
     this.stream = stream;
@@ -150,10 +165,29 @@ export class CloudflareStreamBackend implements VideoBackend {
   }
 
   async getFrame(videoId: string, timestamp: number): Promise<Frame> {
-    const base = await this.thumbnailBase(videoId);
-    const url = new URL(`${base}/thumbnails/thumbnail.jpg`);
+    const source = await this.thumbnailSource(videoId);
+    const first = await this.fetchThumbnail(source, timestamp);
+    if (first.ok) return first.frame;
+    const nearEnd = source.duration - timestamp <= END_RETRY_WINDOW_SECONDS;
+    if (nearEnd && first.status >= 400 && first.status < 500) {
+      for (const earlier of retryTimestamps(timestamp)) {
+        const retry = await this.fetchThumbnail(source, earlier);
+        if (retry.ok) return retry.frame;
+      }
+    }
+    throw new SeekioError(
+      "FRAME_FETCH_FAILED",
+      `Cloudflare Stream returned HTTP ${first.status} for the frame at ${timestamp}s.`,
+    );
+  }
+
+  private async fetchThumbnail(
+    source: ThumbnailSource,
+    timestamp: number,
+  ): Promise<{ ok: true; frame: Frame } | { ok: false; status: number }> {
+    const url = new URL(`${source.base}/thumbnails/thumbnail.jpg`);
     url.searchParams.set("time", `${timestamp}s`);
-    url.searchParams.set("height", String(this.options.frameHeight));
+    url.searchParams.set("height", String(source.height));
     url.searchParams.set("fit", "scale");
     let response: Response;
     try {
@@ -164,13 +198,11 @@ export class CloudflareStreamBackend implements VideoBackend {
         `Could not reach Cloudflare Stream for the frame at ${timestamp}s: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (!response.ok) {
-      throw new SeekioError(
-        "FRAME_FETCH_FAILED",
-        `Cloudflare Stream returned HTTP ${response.status} for the frame at ${timestamp}s.`,
-      );
-    }
-    return { timestamp, mimeType: "image/jpeg", data: await response.arrayBuffer() };
+    if (!response.ok) return { ok: false, status: response.status };
+    return {
+      ok: true,
+      frame: { timestamp, mimeType: "image/jpeg", data: await response.arrayBuffer() },
+    };
   }
 
   async delete(videoId: string): Promise<void> {
@@ -191,10 +223,10 @@ export class CloudflareStreamBackend implements VideoBackend {
     }
   }
 
-  private thumbnailBase(videoId: string): Promise<string> {
-    let base = this.thumbnailBases.get(videoId);
-    if (!base) {
-      base = (async () => {
+  private thumbnailSource(videoId: string): Promise<ThumbnailSource> {
+    let source = this.thumbnailSources.get(videoId);
+    if (!source) {
+      source = (async () => {
         const video = await this.details(videoId);
         const origin = new URL(video.thumbnail).origin;
         let token: string;
@@ -203,10 +235,16 @@ export class CloudflareStreamBackend implements VideoBackend {
         } catch (error) {
           throw backendError(error, `sign video ${videoId}`);
         }
-        return `${origin}/${token}`;
+        // Never upscale: cap at the source height (unknown -> configured frameHeight).
+        const sourceHeight = video.input?.height;
+        const height =
+          sourceHeight > 0
+            ? Math.min(sourceHeight, this.options.frameHeight)
+            : this.options.frameHeight;
+        return { base: `${origin}/${token}`, height, duration: video.duration };
       })();
-      this.thumbnailBases.set(videoId, base);
+      this.thumbnailSources.set(videoId, source);
     }
-    return base;
+    return source;
   }
 }

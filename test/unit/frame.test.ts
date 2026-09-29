@@ -23,6 +23,17 @@ describe("fetchFramesBounded", () => {
     expect(peak).toBeGreaterThan(1);
   });
 
+  it("drops frames whose actual timestamp duplicates an earlier one (end-of-video fallback)", async () => {
+    const backend = new FakeVideoBackend();
+    backend.getFrame = async (_videoId, timestamp) => ({
+      timestamp: timestamp > 9 ? 9 : timestamp,
+      mimeType: "image/jpeg",
+      data: FAKE_JPEG.slice().buffer,
+    });
+    const frames = await fetchFramesBounded(backend, "v", [8, 9, 9.5, 9.999], 2);
+    expect(frames.map((f) => f.timestamp)).toEqual([8, 9]);
+  });
+
   it("wraps unexpected failures as FRAME_FETCH_FAILED and keeps SeekioError codes", async () => {
     const backend = new FakeVideoBackend();
     backend.getFrame = async () => {

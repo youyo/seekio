@@ -293,7 +293,7 @@ The server instructions embedded in Seekio steer agents toward this progressive 
 | Overview frames | 12 (max 30) | `src/config.ts` |
 | Frames per `video_frames` call | 30 | `src/config.ts` |
 | Max fps | 30 | `src/config.ts` |
-| Frame height | 1080 px | `src/config.ts` |
+| Frame height | min(source height, 720 px); never upscaled | `src/config.ts` |
 | Concurrent frame fetches | 6 | `src/config.ts` |
 
 ## Optional MCP Server Portal integration

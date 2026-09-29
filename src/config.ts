@@ -8,7 +8,7 @@ export const defaults = {
   defaultFramesFps: 5,
   maxFps: 30,
   overviewMaxFrames: 12,
-  frameHeight: 1080,
+  frameHeight: 720,
   frameFetchConcurrency: 6,
 } as const;
 
