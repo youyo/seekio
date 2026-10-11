@@ -12,6 +12,7 @@ export function registerOverview(server: McpServer, deps: ToolDeps): void {
     "video_overview",
     {
       title: "Video overview",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Inspect the whole timeline at low temporal resolution: returns up to max_frames evenly spaced frames as timestamped images. Use it first to locate suspicious time ranges, then zoom in with video_frames.",
       inputSchema: z.object({

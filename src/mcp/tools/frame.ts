@@ -27,6 +27,7 @@ export function registerFrame(server: McpServer, deps: ToolDeps): void {
     "video_frame",
     {
       title: "Exact video frame",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description: `Get the single frame at an exact timestamp (sub-second precision) as an image. Use it for precise inspection after narrowing the range with video_overview and video_frames. Whole frames are downscaled (about ${deps.config.frameHeight}px tall), so small text such as credits or captions may be unreadable: to read fine details, pass region to crop that area out of the original-resolution frame (long edge at most ${maxLongEdge}px). region is { x, y, width, height } as ratios (0-1) of the frame with the origin at the top-left (x = left edge, y = top edge). Example: bottom credits = { x: 0, y: 0.8, width: 1, height: 0.2 }.`,
       inputSchema: z.object({
         video_id: videoIdSchema,

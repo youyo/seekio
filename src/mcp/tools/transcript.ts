@@ -50,6 +50,12 @@ export function registerTranscript(server: McpServer, deps: ToolDeps): void {
     "video_transcript",
     {
       title: "Video transcript",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description: `Get the spoken words of a video as timestamped text cues [{ start, end, text }] (seconds, millisecond precision, the same unit as the at of video_frame), using Cloudflare Stream's AI captions. It does not play audio and does not analyze sound or waveforms; it only returns Stream's speech-to-text with times. Use it to check what is said when, for example whether on-screen subtitles match the narration: get the cue times here, then look at the frames around them with video_frames. There is no automatic language detection: pass the language that is spoken in languages (${CAPTION_LANGUAGES.join(", ")}; plain codes such as en, not en-US), one to three of them. If the video mixes languages or you do not know the language, pass all candidates together, for example ["ja","en"]. Each language's result is only reliable in the parts where that language is actually spoken; the other parts are misrecognized or hallucinated text (for example a stock phrase like a sign-off), so ignore them. Cue times are accurate to about ±0.5 seconds, a sentence can be split into several cues, and cues are per phrase rather than per word. Generation is asynchronous (roughly 10 seconds for a 3-minute video) and the first call starts it: if a language is still "inprogress", call again with wait_seconds (0-${maxWait}, same as video_info). start and end (seconds) limit the returned cues to that range. Videos without an audio track fail with NO_AUDIO_TRACK.`,
       inputSchema: z.object({
         video_id: videoIdSchema,

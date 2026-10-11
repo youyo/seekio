@@ -9,6 +9,14 @@ export type Content =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
 
+export type ListedTool = {
+  name: string;
+  title?: string;
+  description?: string;
+  annotations?: Record<string, unknown>;
+  inputSchema?: { properties?: Record<string, { description?: string }> };
+};
+
 export type ToolResult = { content: Content[]; isError?: boolean };
 
 /** Drives the real MCP server over the SDK's HTTP handler without a network or a client package. */
@@ -49,8 +57,7 @@ export function createHarness<B extends VideoBackend = FakeVideoBackend>(
 
   return {
     backend,
-    listTools: () =>
-      rpc<{ tools: Array<{ name: string; description?: string }> }>("tools/list", {}),
+    listTools: () => rpc<{ tools: Array<ListedTool> }>("tools/list", {}),
     callTool: (name: string, args: Record<string, unknown>) =>
       rpc<ToolResult>("tools/call", { name, arguments: args }),
   };

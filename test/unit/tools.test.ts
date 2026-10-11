@@ -108,6 +108,88 @@ describe("video_create_upload", () => {
   });
 });
 
+describe("tool annotations and titles", () => {
+  const read = { readOnlyHint: true, openWorldHint: false };
+  const expected: Record<string, { title: string; annotations: Record<string, boolean> }> = {
+    video_create_upload: {
+      title: "Create video upload",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    video_import_url: {
+      title: "Import video from URL",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    video_info: { title: "Video info", annotations: read },
+    video_overview: { title: "Video overview", annotations: read },
+    video_frames: { title: "Video frames in range", annotations: read },
+    video_frame: { title: "Exact video frame", annotations: read },
+    video_transcript: {
+      title: "Video transcript",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    video_delete: {
+      title: "Delete video",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+  };
+
+  for (const name of TOOL_NAMES) {
+    it(`${name} has the expected title and annotations`, async () => {
+      const { tools } = await harness.listTools();
+      const tool = tools.find((t) => t.name === name);
+      expect(tool?.title).toBe(expected[name]?.title);
+      expect(tool?.annotations).toMatchObject(expected[name]?.annotations ?? {});
+    });
+  }
+});
+
+describe("video_id parameter description", () => {
+  const idTools = TOOL_NAMES.filter(
+    (n) => !["video_create_upload", "video_import_url"].includes(n),
+  );
+  for (const name of idTools) {
+    it(`${name} says video_import_url ids are accepted`, async () => {
+      const { tools } = await harness.listTools();
+      const desc = tools.find((t) => t.name === name)?.inputSchema?.properties?.video_id
+        ?.description;
+      expect(desc).toContain("video_create_upload");
+      expect(desc).toContain("video_import_url");
+    });
+  }
+});
+
+describe("video_import_url description (generic direct links)", () => {
+  it("mentions links returned by other tools and the duration limit, without naming other servers", async () => {
+    const { tools } = await harness.listTools();
+    const desc = tools.find((t) => t.name === "video_import_url")?.description ?? "";
+    expect(desc).toContain("returned by another tool");
+    expect(desc).toContain(`${defaults.maxVideoDurationSeconds} seconds`);
+    expect(desc).not.toContain("x-reader");
+    expect(desc).not.toContain("get_post");
+    expect(desc).not.toContain("video_url");
+  });
+});
+
 describe("video_import_url description", () => {
   it("uses wait_seconds instead of polling", async () => {
     const { tools } = await harness.listTools();

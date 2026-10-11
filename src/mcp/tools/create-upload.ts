@@ -12,6 +12,12 @@ export function registerCreateUpload(server: McpServer, deps: ToolDeps): void {
     "video_create_upload",
     {
       title: "Create video upload",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       description: `Create a one-time direct upload URL for a video. The server cannot read your local files, so the upload is a separate step: replace <PATH> in the returned upload_command with the local file path and run it in a shell (inside <PATH>, escape every " and \\ with a backslash, and do not use a single quote ' in the path; curl 7.76 or newer is required for --fail-with-body; it POSTs the file as multipart/form-data, field name: file, to upload_url; on success the last line printed is uploaded video_id=<video_id>, on failure it exits non-zero and prints the error body) before expires_at, then call video_info with wait_seconds (up to ${deps.config.infoMaxWaitSeconds}) to wait until the video is ready. Videos are stored temporarily in the Cloudflare account and are deleted automatically about ${deps.config.videoRetentionHours} hours after creation (the cleanup runs hourly, so up to about an hour later); call video_delete as soon as you are done to remove them immediately.`,
       inputSchema: z.object({
         filename: z
