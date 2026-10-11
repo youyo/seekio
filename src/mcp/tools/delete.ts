@@ -9,6 +9,12 @@ export function registerDelete(server: McpServer, deps: ToolDeps): void {
     "video_delete",
     {
       title: "Delete video",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       description:
         "Delete a video and its frames from storage. Safe to call more than once. Call it when the investigation is finished.",
       inputSchema: z.object({ video_id: videoIdSchema }),
