@@ -57,6 +57,7 @@ export function createHarness<B extends VideoBackend = FakeVideoBackend>(
 
   return {
     backend,
+    rpc,
     listTools: () => rpc<{ tools: Array<ListedTool> }>("tools/list", {}),
     callTool: (name: string, args: Record<string, unknown>) =>
       rpc<ToolResult>("tools/call", { name, arguments: args }),

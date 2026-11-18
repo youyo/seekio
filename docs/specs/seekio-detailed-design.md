@@ -32,7 +32,7 @@ Repository investigation / fix
 
 ## 2. v1 完成条件
 
-途中の vertical slice ではリリースせず、最初から以下の6 toolsを揃える（その後 `video_import_url` を追加し、その後 `video_transcript` を追加し、現在は8 tools）。
+途中の vertical slice ではリリースせず、最初から以下の6 toolsを揃える（その後 `video_import_url` を追加し、その後 `video_transcript` を追加し、その後フィードバックの案内 `seekio_feedback` を追加し、現在は9 tools）。
 
 ``` text
 video_create_upload
@@ -42,6 +42,7 @@ video_overview
 video_frames
 video_frame
 video_delete
+seekio_feedback
 ```
 
 加えて以下を満たす。
@@ -109,6 +110,7 @@ Claude Code / Codex / MCP Client
 │ video_frames                 │
 │ video_frame                  │
 │ video_delete                 │
+│ seekio_feedback              │
 │                              │
 │ scheduled (Cron, 毎時)       │
 │  └ 期限切れ動画の削除        │
@@ -1265,6 +1267,7 @@ inspect video timelines as timestamped image frames.
 16. README
 17. optional portal task
 18. Claude Code / Codex E2E
+19. seekio_feedback
 ```
 
 4〜5 は architecture validation として使うが、そこでリリースしない。v1

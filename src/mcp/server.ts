@@ -1,21 +1,20 @@
 import { McpServer } from "@modelcontextprotocol/server";
-import pkg from "../../package.json";
 import type { SeekioConfig } from "../config";
 import { log } from "../log";
+import { serverInfo } from "../server-info";
 import type { VideoBackend, VideoInfo } from "../video/backend";
 import type { ImageCropper } from "../video/image";
 import { isSeekioError, messages, SeekioError, type SeekioErrorCode } from "./errors";
 import { buildInstructions } from "./instructions";
 import { registerCreateUpload } from "./tools/create-upload";
 import { registerDelete } from "./tools/delete";
+import { registerFeedback } from "./tools/feedback";
 import { registerFrame } from "./tools/frame";
 import { registerFrames } from "./tools/frames";
 import { registerImportUrl } from "./tools/import-url";
 import { registerInfo } from "./tools/info";
 import { registerOverview } from "./tools/overview";
 import { registerTranscript } from "./tools/transcript";
-
-export const serverInfo = { name: "seekio", version: pkg.version } as const;
 
 export type ToolDeps = {
   backend: VideoBackend;
@@ -103,5 +102,6 @@ export function createSeekioServer(deps: ToolDeps): McpServer {
   registerFrame(server, deps);
   registerTranscript(server, deps);
   registerDelete(server, deps);
+  registerFeedback(server, deps);
   return server;
 }

@@ -1,22 +1,26 @@
-export type SeekioErrorCode =
-  | "VIDEO_NOT_FOUND"
-  | "VIDEO_NOT_READY"
-  | "VIDEO_PROCESSING_FAILED"
-  | "INVALID_TIMESTAMP"
-  | "INVALID_INTERVAL"
-  | "TOO_MANY_FRAMES"
-  | "INVALID_URL"
-  | "URL_ALREADY_IMPORTED"
-  | "VIDEO_TOO_LONG"
-  | "UPLOAD_CREATE_FAILED"
-  | "FRAME_FETCH_FAILED"
-  | "INVALID_REGION"
-  | "REGION_UNAVAILABLE"
-  | "REGION_CROP_FAILED"
-  | "NO_AUDIO_TRACK"
-  | "UNSUPPORTED_LANGUAGE"
-  | "TRANSCRIPT_FAILED"
-  | "BACKEND_ERROR";
+/** Every error code a tool can return. The feedback guide reads this list, so keep it in sync by editing only here. */
+export const SEEKIO_ERROR_CODES = [
+  "VIDEO_NOT_FOUND",
+  "VIDEO_NOT_READY",
+  "VIDEO_PROCESSING_FAILED",
+  "INVALID_TIMESTAMP",
+  "INVALID_INTERVAL",
+  "TOO_MANY_FRAMES",
+  "INVALID_URL",
+  "URL_ALREADY_IMPORTED",
+  "VIDEO_TOO_LONG",
+  "UPLOAD_CREATE_FAILED",
+  "FRAME_FETCH_FAILED",
+  "INVALID_REGION",
+  "REGION_UNAVAILABLE",
+  "REGION_CROP_FAILED",
+  "NO_AUDIO_TRACK",
+  "UNSUPPORTED_LANGUAGE",
+  "TRANSCRIPT_FAILED",
+  "BACKEND_ERROR",
+] as const;
+
+export type SeekioErrorCode = (typeof SEEKIO_ERROR_CODES)[number];
 
 /** An error whose message tells the agent what to do next. */
 export class SeekioError extends Error {

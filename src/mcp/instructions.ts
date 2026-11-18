@@ -36,6 +36,8 @@ To check whether on-screen subtitles match the voice (narration), or to know whe
 2. Take the cue start/end times of the speech you care about (accurate to about ±0.5 seconds; each language is only reliable where that language is spoken).
 3. Look at the frames just before and after those times with video_frames (or video_frame for one exact time) and compare the subtitle shown on screen with the cue text.
 
+不具合・要望・質問を GitHub issue として報告したいときは、利用者の依頼か同意があるときに限り \`seekio_feedback\` を呼ぶ（案内を返すだけで、issue は作らない）。
+
 For frontend debugging, look for:
 - layout shifts
 - flickering
