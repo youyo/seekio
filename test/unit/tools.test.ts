@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaults } from "../../src/config";
+import { buildFeedbackGuide, FEEDBACK_KINDS } from "../../src/feedback/guide";
 import { SeekioError } from "../../src/mcp/errors";
 import { FAKE_JPEG, FakeVideoBackend } from "./fake-backend";
 import { cropFailed, FAKE_CROP_JPEG, FakeImageCropper } from "./fake-cropper";
@@ -14,6 +15,7 @@ const TOOL_NAMES = [
   "video_frame",
   "video_transcript",
   "video_delete",
+  "seekio_feedback",
 ];
 const FAKE_JPEG_BASE64 = Buffer.from(FAKE_JPEG).toString("base64");
 const FAKE_CROP_BASE64 = Buffer.from(FAKE_CROP_JPEG).toString("base64");
@@ -28,7 +30,7 @@ beforeEach(() => {
 });
 
 describe("tools/list", () => {
-  it("exposes exactly the eight tools with descriptions", async () => {
+  it("exposes exactly the nine tools with descriptions", async () => {
     const { tools } = await harness.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
     for (const tool of tools) expect(tool.description).toBeTruthy();
@@ -142,6 +144,10 @@ describe("tool annotations and titles", () => {
         openWorldHint: false,
       },
     },
+    seekio_feedback: {
+      title: "フィードバック（GitHub issue の起票案内）",
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
     video_delete: {
       title: "Delete video",
       annotations: {
@@ -165,7 +171,7 @@ describe("tool annotations and titles", () => {
 
 describe("video_id parameter description", () => {
   const idTools = TOOL_NAMES.filter(
-    (n) => !["video_create_upload", "video_import_url"].includes(n),
+    (n) => !["video_create_upload", "video_import_url", "seekio_feedback"].includes(n),
   );
   for (const name of idTools) {
     it(`${name} says video_import_url ids are accepted`, async () => {
@@ -764,5 +770,62 @@ describe("video_info readiness wording", () => {
     const desc = tools.find((t) => t.name === "video_info")?.description ?? "";
     expect(desc).toMatch(/ready/);
     expect(desc).toMatch(/pct_complete.*(below|less than|under) 100|100.*pct_complete/i);
+  });
+});
+
+describe("seekio_feedback", () => {
+  it("does not mark itself destructive, and takes only kind as input", async () => {
+    const { tools } = await harness.listTools();
+    const tool = tools.find((t) => t.name === "seekio_feedback");
+    expect(tool?.annotations?.destructiveHint).not.toBe(true);
+    expect(Object.keys(tool?.inputSchema?.properties ?? {})).toEqual(["kind"]);
+    expect(tool?.description).toMatch(/issue を作らない/);
+  });
+
+  it("returns the bug guide as a single JSON text content when kind is omitted", async () => {
+    const result = await harness.callTool("seekio_feedback", {});
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0]?.type).toBe("text");
+    expect(jsonOf(result)).toEqual(buildFeedbackGuide("bug"));
+    expect((result as Record<string, unknown>).structuredContent).toBeUndefined();
+  });
+
+  it.each(FEEDBACK_KINDS)("accepts kind=%s", async (kind) => {
+    const result = await harness.callTool("seekio_feedback", { kind });
+    expect(jsonOf(result)).toEqual(buildFeedbackGuide(kind));
+  });
+
+  it("never touches the video backend", async () => {
+    await harness.callTool("seekio_feedback", { kind: "feature" });
+    expect(backend.calls).toEqual([]);
+  });
+
+  it("rejects an unknown kind as a validation error without echoing the value", async () => {
+    const result = await harness.callTool("seekio_feedback", { kind: "complaint-xyz" });
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("Input validation error");
+    expect(text).not.toContain("complaint-xyz");
+    expect(text).not.toContain("schema_version");
+  });
+
+  it("ignores undeclared arguments and never reflects them", async () => {
+    const result = await harness.callTool("seekio_feedback", {
+      title: "sentinel-title-88",
+      video_id: "sentinel-video-99",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("sentinel");
+    expect(jsonOf(result)).toEqual(buildFeedbackGuide("bug"));
+  });
+});
+
+describe("server instructions: seekio_feedback", () => {
+  it("tells the agent to call seekio_feedback only on the user's request or consent", async () => {
+    const { instructions } = await import("../../src/mcp/instructions");
+    expect(instructions).toContain(
+      "不具合・要望・質問を GitHub issue として報告したいときは、利用者の依頼か同意があるときに限り `seekio_feedback` を呼ぶ（案内を返すだけで、issue は作らない）。",
+    );
   });
 });

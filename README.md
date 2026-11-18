@@ -51,6 +51,7 @@ Claude Code / Codex / MCP Client
 │ video_frame                  │
 │ video_transcript             │
 │ video_delete                 │
+│ seekio_feedback              │
 └──────────────┬───────────────┘
                │ Stream binding
                ▼
@@ -326,6 +327,14 @@ The first call starts caption generation for each language that has none yet (ab
 ```
 
 Deleting an already deleted video succeeds. Call it as soon as you are done: automatic deletion (see [Data handling](#data-handling)) is a backstop, not a substitute.
+
+### `seekio_feedback`
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `kind` | `"bug"` \| `"feature"` \| `"question"` \| `"other"`, optional | Selects the issue template (default `bug`) |
+
+Returns a guide (JSON in `text` content) for reporting a Seekio bug, request or question as a GitHub issue: the target repository, a Japanese issue template for the chosen `kind`, anonymization rules, and the steps to create the issue. It does **not** create an issue, talk to GitHub or call any external service, and it never touches your videos. The response depends only on `kind`, so it contains nothing about the deployment (host, token, limits). The target is always the upstream public repository [`youyo/seekio`](https://github.com/youyo/seekio), even when called through a downstream deployment. The agent should call it only when the user asks for a report or agrees to one, then rebuild the report with anonymized content and have the user approve the final text before creating the issue. See [ADR 0019](https://github.com/youyo/logbutler/blob/main/docs/adr/0019-feedback-tool.md) for the specification.
 
 ## Example debugging workflow
 
